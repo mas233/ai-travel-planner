@@ -1,0 +1,75 @@
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  padding: 16px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo {
+  width: 40px;
+  height: 40px;
+  color: #1890ff;
+}
+
+.app-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #333;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.user-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.user-avatar:hover {
+  transform: scale(1.05);
+}
+
+.main-content {
+  flex: 1;
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.footer {
+  background: #001529;
+  color: rgba(255,255,255,0.65);
+  padding: 24px 32px;
+  text-align: center;
+}
+
+.footer p {
+  margin: 4px 0;
+}
