@@ -1,4 +1,5 @@
 // AI Service for generating travel itineraries using Tongyi Qianwen API
+import { geocodeAddress } from './amapService'
 
 const QIANWEN_API_KEY = import.meta.env.VITE_QIANWEN_API_KEY
 const QIANWEN_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
@@ -10,6 +11,147 @@ const XUNFEI_HTTP_ENDPOINT = 'https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/co
 // 模型名称，需在 .env 配置，例如：General-Spark-Standard 或 General-Spark-Lite
 const XUNFEI_MODEL = import.meta.env.VITE_XUNFEI_MODEL
 
+// ---------- Helpers for geocoding & normalization (module scope) ----------
+function isValidLongitude(lng) {
+  return Number.isFinite(lng) && lng >= -180 && lng <= 180
+}
+
+function isValidLatitude(lat) {
+  return Number.isFinite(lat) && lat >= -90 && lat <= 90
+}
+
+function toNumberOrNull(val) {
+  const n = typeof val === 'string' ? parseFloat(val) : val
+  return Number.isFinite(n) ? n : null
+}
+
+async function safeGeocode(address) {
+  try {
+    const { longitude, latitude } = await geocodeAddress(address)
+    return {
+      longitude: toNumberOrNull(longitude),
+      latitude: toNumberOrNull(latitude)
+    }
+  } catch (_) {
+    return { longitude: null, latitude: null }
+  }
+}
+
+async function enrichItineraryWithCoords({ itinerary, destination, days, budget, travelers }) {
+  const destLatRaw = itinerary.destination_latitude
+  const destLngRaw = itinerary.destination_longitude
+  let destLat = toNumberOrNull(destLatRaw)
+  let destLng = toNumberOrNull(destLngRaw)
+
+  if (!isValidLatitude(destLat) || !isValidLongitude(destLng)) {
+    const dest = await safeGeocode(destination)
+    destLat = dest.latitude
+    destLng = dest.longitude
+  }
+
+  const normalizedItinerary = {
+    destination_latitude: isValidLatitude(destLat) ? destLat : null,
+    destination_longitude: isValidLongitude(destLng) ? destLng : null,
+    days: (Array.isArray(itinerary.days) ? itinerary.days : []).map((day, index) => ({
+      day: day?.day || index + 1,
+      theme: day?.theme || `第${index + 1}天`,
+      locations: Array.isArray(day?.locations) ? day.locations : [],
+      accommodation: day?.accommodation || {
+        name: '待定酒店',
+        area: destination,
+        priceRange: '中档',
+        estimatedCost: Math.round((budget || 0) / (days || 1) / (travelers || 1) * 0.4)
+      },
+      meals: day?.meals || {
+        breakfast: '酒店早餐',
+        lunch: '当地餐厅',
+        dinner: '特色美食'
+      },
+      transportation: day?.transportation || {
+        type: '公共交通',
+        estimatedCost: Math.round((budget || 0) / (days || 1) * 0.1)
+      },
+      estimatedCost: day?.estimatedCost || Math.round((budget || 0) / (days || 1))
+    })),
+    budgetBreakdown: itinerary.budgetBreakdown || {
+      accommodation: Math.round((budget || 0) * 0.35),
+      food: Math.round((budget || 0) * 0.25),
+      transportation: Math.round((budget || 0) * 0.20),
+      attractions: Math.round((budget || 0) * 0.10),
+      shopping: Math.round((budget || 0) * 0.05),
+      reserve: Math.round((budget || 0) * 0.05)
+    },
+    tips: Array.isArray(itinerary.tips) ? itinerary.tips : [
+      '提前预订景点门票',
+      '注意天气变化',
+      '保管好贵重物品'
+    ],
+    transportation: itinerary.transportation || {
+      toDestination: '飞机/高铁',
+      local: '地铁/公交',
+      estimatedCost: Math.round((budget || 0) * 0.2)
+    }
+  }
+
+  const destFallback = {
+    longitude: normalizedItinerary.destination_longitude,
+    latitude: normalizedItinerary.destination_latitude
+  }
+
+  for (const day of normalizedItinerary.days) {
+    const newLocs = []
+    for (const loc of day.locations) {
+      const name = loc?.name || '未命名景点'
+      const place = loc?.place || destination
+
+      let lng = toNumberOrNull(loc?.longitude)
+      let lat = toNumberOrNull(loc?.latitude)
+
+      const hasValid = isValidLongitude(lng) && isValidLatitude(lat)
+      if (!hasValid) {
+        const addrCandidates = [
+          place,
+          `${destination} ${place}`,
+          `${destination} ${name}`,
+          destination
+        ]
+
+        let found = { longitude: null, latitude: null }
+        for (const addr of addrCandidates) {
+          const res = await safeGeocode(addr)
+          if (isValidLongitude(res.longitude) && isValidLatitude(res.latitude)) {
+            found = res
+            break
+          }
+        }
+
+        if (isValidLongitude(found.longitude) && isValidLatitude(found.latitude)) {
+          lng = found.longitude
+          lat = found.latitude
+        } else if (isValidLongitude(destFallback.longitude) && isValidLatitude(destFallback.latitude)) {
+          lng = destFallback.longitude
+          lat = destFallback.latitude
+        } else {
+          lng = null
+          lat = null
+        }
+      }
+
+      newLocs.push({
+        name,
+        place,
+        longitude: isValidLongitude(lng) ? lng : null,
+        latitude: isValidLatitude(lat) ? lat : null,
+        description: loc?.description || '',
+        time: loc?.time || '全天',
+        tips: loc?.tips || ''
+      })
+    }
+    day.locations = newLocs
+  }
+
+  return normalizedItinerary
+}
 /**
  * Generate travel itinerary using Tongyi Qianwen LLM
  * @param {Object} params - Travel parameters
@@ -23,7 +165,7 @@ const XUNFEI_MODEL = import.meta.env.VITE_XUNFEI_MODEL
 export async function generateItinerary({ destination, days, budget, travelers, preferences }) {
   if (!QIANWEN_API_KEY || QIANWEN_API_KEY === 'your_qianwen_api_key') {
     console.warn('Qianwen API key not configured, using mock data')
-    return generateMockItinerary({ destination, days, budget, travelers, preferences })
+    return await generateMockItinerary({ destination, days, budget, travelers, preferences })
   }
 
   try {
@@ -32,6 +174,8 @@ export async function generateItinerary({ destination, days, budget, travelers, 
 你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明：
 
 {
+  "destination_latitude": 目的地纬度(标准数字),
+  "destination_longitude": 目的地经度(标准数字),
   "days": [
     {
       "day": 1,
@@ -147,82 +291,33 @@ export async function generateItinerary({ destination, days, budget, travelers, 
 
     // Parse the JSON string
     const itinerary = JSON.parse(contentString)
-    
+
     // Validate the structure
     if (!itinerary.days || !Array.isArray(itinerary.days)) {
       throw new Error('Invalid itinerary structure: missing days array')
     }
 
-    // Ensure all required fields exist with defaults
-    const validatedItinerary = {
-      days: itinerary.days.map((day, index) => ({
-        day: day.day || index + 1,
-        theme: day.theme || `第${index + 1}天`,
-        locations: Array.isArray(day.locations) ? day.locations.map(loc => ({
-          name: loc.name || '未命名景点',
-          place: loc.place || destination,
-          longitude: (Number.isFinite(loc?.longitude) && loc.longitude >= -180 && loc.longitude <= 180) ? loc.longitude : null,
-          latitude: (Number.isFinite(loc?.latitude) && loc.latitude >= -90 && loc.latitude <= 90) ? loc.latitude : null,
-          description: loc.description || '',
-          time: loc.time || '全天',
-          tips: loc.tips || ''
-        })) : [],
-        accommodation: day.accommodation || {
-          name: '待定酒店',
-          area: destination,
-          priceRange: '中档',
-          estimatedCost: Math.round(budget / days / travelers * 0.4)
-        },
-        meals: day.meals || {
-          breakfast: '酒店早餐',
-          lunch: '当地餐厅',
-          dinner: '特色美食'
-        },
-        transportation: day.transportation || {
-          type: '公共交通',
-          estimatedCost: Math.round(budget / days * 0.1)
-        },
-        estimatedCost: day.estimatedCost || Math.round(budget / days)
-      })),
-      budgetBreakdown: itinerary.budgetBreakdown || {
-        accommodation: Math.round(budget * 0.35),
-        food: Math.round(budget * 0.25),
-        transportation: Math.round(budget * 0.20),
-        attractions: Math.round(budget * 0.10),
-        shopping: Math.round(budget * 0.05),
-        reserve: Math.round(budget * 0.05)
-      },
-      tips: Array.isArray(itinerary.tips) ? itinerary.tips : [
-        '提前预订景点门票',
-        '注意天气变化',
-        '保管好贵重物品'
-      ],
-      transportation: itinerary.transportation || {
-        toDestination: '飞机/高铁',
-        local: '地铁/公交',
-        estimatedCost: Math.round(budget * 0.2)
-      }
-    }
-
+    // Normalize and fill defaults, then enrich with coordinates
+    const normalized = await enrichItineraryWithCoords({ itinerary, destination, days, budget, travelers })
     console.log('Successfully generated itinerary from Qianwen API')
-    return validatedItinerary
+    return normalized
 
   } catch (error) {
     console.error('Error calling Qianwen API:', error)
     
     // If API call fails, fall back to mock data
     console.warn('Falling back to mock itinerary due to error')
-    return generateMockItinerary({ destination, days, budget, travelers, preferences })
+    return await generateMockItinerary({ destination, days, budget, travelers, preferences })
   }
 }
 
 /**
  * Generate mock itinerary for testing/fallback
  */
-function generateMockItinerary({ destination, days, budget, travelers, preferences }) {
+async function generateMockItinerary({ destination, days, budget, travelers, preferences }) {
   console.log('Generating mock itinerary for:', { destination, days, budget, travelers, preferences })
   
-  return {
+  const mock = {
     days: Array.from({ length: days }, (_, i) => ({
       day: i + 1,
       theme: i === 0 ? '抵达与适应' : i === days - 1 ? '返程准备' : `探索${destination}`,
@@ -293,9 +388,12 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
       estimatedCost: Math.round(budget * 0.2)
     }
   }
+
+  // 使用与正式流程一致的坐标填充逻辑
+  const enriched = await enrichItineraryWithCoords({ itinerary: mock, destination, days, budget, travelers })
+  return enriched
 }
 
-// 移除未使用的占位语音识别方法（recognizeVoice）
 
 /**
  * Parse user voice input to extract travel plan details.
@@ -329,10 +427,8 @@ export async function parseVoiceInput(voiceInput) {
 }
 
 注意：
-- 日期推断：你将获得“当前系统时间（UTC±HH:mm）”。若用户未明确年份或仅提到相对时间（如“下周末”“本月中旬”“国庆假期”），请基于当前系统时间计算出具体的 YYYY-MM-DD；若无法唯一确定，请返回 null。
-- 日期处理：如果用户仅提到月份，默认为当年的该月1号；统一输出为 YYYY-MM-DD。
-- 数字转换：确保预算和人数是数字类型。
-- 字段缺失：如果信息不明确或未提供，返回 null。`;
+- 你将获得“当前系统时间（UTC±HH:mm）”；若用户未明确年份或仅提到相对时间（如“下周末”“本月中旬”），请根据当前系统时间推断具体 YYYY-MM-DD；若无法确定返回 null。
+- 统一日期输出格式为 YYYY-MM-DD；数字字段确保为数字类型。`;
 
     const userPrompt = `当前时间上下文：${currentContext}\n\n请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
 

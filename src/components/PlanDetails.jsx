@@ -15,13 +15,22 @@ function PlanDetails({ plan }) {
   });
   const [activeTab, setActiveTab] = useState('itinerary');
 
-  // Emit a segment navigation event for MapView to listen and draw route
-  const triggerSegmentRoute = (fromName, toName) => {
-    if (!fromName || !toName) return;
+  // Emit a driving route event with coordinates, robustly handling null/same points
+  const triggerSegmentRoute = (startLoc, endLoc) => {
+    if (!startLoc || !endLoc) return;
+    const toNum = (v) => {
+      const n = typeof v === 'string' ? parseFloat(v) : v;
+      return Number.isFinite(n) ? n : null;
+    };
+    const slng = toNum(startLoc.longitude), slat = toNum(startLoc.latitude);
+    const tlng = toNum(endLoc.longitude), tlat = toNum(endLoc.latitude);
+    const valid = (lng, lat) => typeof lng === 'number' && typeof lat === 'number' && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
+    if (!valid(slng, slat) || !valid(tlng, tlat)) return; // null/invalid -> keep original map
+    if (slng === tlng && slat === tlat) return; // same start/end -> keep original map
     try {
-      window.dispatchEvent(new CustomEvent('map:routeSegment', { detail: { from: fromName, to: toName } }));
+      window.dispatchEvent(new CustomEvent('map:drivingRoute', { detail: { start: { lng: slng, lat: slat }, end: { lng: tlng, lat: tlat } } }));
     } catch (err) {
-      console.error('Failed to dispatch route segment event:', err);
+      console.error('Failed to dispatch driving route event:', err);
     }
   };
 
@@ -76,7 +85,7 @@ function PlanDetails({ plan }) {
                   <button
                     className="route-segment-btn"
                     title="导航至下一地点"
-                    onClick={() => triggerSegmentRoute(loc.name || loc.place, day.locations[index + 1].name || day.locations[index + 1].place)}
+                    onClick={() => triggerSegmentRoute(loc, day.locations[index + 1])}
                   >
                     <Navigation size={14} /> 导航至下一地点
                   </button>

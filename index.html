@@ -5,8 +5,27 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI 旅行规划师</title>
-    <!-- AMap v2 API 脚本（按 kimi.txt 要求加载全局 AMap 与插件） -->
-    <script type="text/javascript" src="https://webapi.amap.com/maps?v=2.0&key=cc21af0d918598642f03dbe364eb8821&plugin=AMap.Geocoder,AMap.Driving"></script>
+    <!-- 先配置安全码，再按环境变量加载 AMap JSAPI（包含 Geocoder 与 Driving 插件） -->
+    <script type="module">
+      const secureKey = import.meta.env.VITE_AMAP_SECURE_KEY || '';
+      if (secureKey) {
+        window._AMapSecurityConfig = { securityJsCode: secureKey };
+      }
+      const amapKey = import.meta.env.VITE_AMAP_KEY || '';
+      const src = `https://webapi.amap.com/maps?v=2.0&key=${amapKey}&plugin=AMap.Geocoder,AMap.Driving`;
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = () => {
+        try {
+          window.dispatchEvent(new Event('amap:loaded'));
+        } catch {}
+      };
+      s.onerror = (e) => {
+        console.error('AMap脚本加载失败', e);
+      };
+      document.head.appendChild(s);
+    </script>
   </head>
   <body>
     <div id="root"></div>
