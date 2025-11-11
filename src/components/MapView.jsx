@@ -13,7 +13,7 @@ function MapView({ plan }) {
         const AMap = await AMapLoader.load({
           key: import.meta.env.VITE_AMAP_KEY || 'your-amap-key',
           version: '2.0',
-          plugins: ['AMap.Geocoder', 'AMap.Marker', 'AMap.Polyline']
+          plugins: ['AMap.Geocoder', 'AMap.Marker', 'AMap.Polyline', 'AMap.Driving']
         })
 
         if (mapInstanceRef.current) {
@@ -50,12 +50,16 @@ function MapView({ plan }) {
         const AMap = window.AMap
         const map = mapInstanceRef.current
 
-        // Clear existing markers
+        // Clear existing markers and routes
         markersRef.current.forEach(marker => marker.setMap(null))
         markersRef.current = []
+        if (window.driving) {
+          window.driving.clear()
+        }
 
         const geocoder = new AMap.Geocoder()
         const locations = []
+        const waypoints = []
 
         // Get coordinates for each day's locations
         if (plan.itinerary.days) {
@@ -73,15 +77,16 @@ function MapView({ plan }) {
                     })
                   })
 
+                  const position = [result.lng, result.lat];
                   locations.push({
-                    position: result,
+                    position: position,
                     name: location.name || location.place,
                     description: location.description
                   })
 
                   // Add marker
                   const marker = new AMap.Marker({
-                    position: result,
+                    position: position,
                     title: location.name || location.place,
                     map: map
                   })
@@ -99,66 +104,54 @@ function MapView({ plan }) {
                   })
 
                   markersRef.current.push(marker)
-                } catch (err) {
-                  console.warn('Failed to geocode:', location.name)
+
+                  if (locations.length > 1) {
+                    waypoints.push(position);
+                  }
+
+                } catch (error) {
+                  console.error('Error geocoding location:', location.name, error)
                 }
               }
             }
           }
         }
 
-        // Draw route if multiple locations
         if (locations.length > 1) {
-          const path = locations.map(loc => loc.position)
-          new AMap.Polyline({
-            path: path,
-            strokeColor: '#667eea',
-            strokeWeight: 4,
-            strokeOpacity: 0.8,
-            map: map
-          })
+          const start = locations[0].position;
+          const end = locations[locations.length - 1].position;
+          const path = waypoints.slice(0, -1);
 
-          // Fit map to show all markers
-          map.setFitView()
+          const driving = new AMap.Driving({
+            map: map,
+            policy: AMap.DrivingPolicy.LEAST_TIME
+          });
+
+          window.driving = driving; // Store driving instance to clear it later
+
+          driving.search(start, end, { waypoints: path }, (status, result) => {
+            if (status === 'complete') {
+              // Fit map to route
+              map.setFitView();
+            } else {
+              console.error('Failed to get driving route:', result);
+            }
+          });
         } else if (locations.length === 1) {
           map.setCenter(locations[0].position)
-          map.setZoom(13)
-        } else {
-          // Try to geocode destination
-          try {
-            const result = await new Promise((resolve, reject) => {
-              geocoder.getLocation(plan.destination, (status, data) => {
-                if (status === 'complete' && data.geocodes.length) {
-                  resolve(data.geocodes[0].location)
-                } else {
-                  reject(new Error('Geocoding failed'))
-                }
-              })
-            })
-            map.setCenter(result)
-            map.setZoom(11)
-          } catch (err) {
-            console.warn('Failed to geocode destination:', plan.destination)
-          }
+          map.setZoom(14)
         }
+
       } catch (error) {
-        console.error('Error updating map:', error)
+        console.error('Error updating map with plan:', error)
       }
     }
 
     updateMapWithPlan()
+
   }, [plan])
 
-  return (
-    <div className="map-view">
-      <div ref={mapRef} style={{ width: '100%', height: '100%' }} />
-      {!plan && (
-        <div className="map-placeholder">
-          <p>请选择或创建旅行计划以查看地图</p>
-        </div>
-      )}
-    </div>
-  )
+  return <div ref={mapRef} className="map-view"></div>
 }
 
 export default MapView

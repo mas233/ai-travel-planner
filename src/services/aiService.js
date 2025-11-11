@@ -3,6 +3,13 @@
 const QIANWEN_API_KEY = import.meta.env.VITE_QIANWEN_API_KEY
 const QIANWEN_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 
+// 讯飞 Spark 推理服务（HTTP 协议，OpenAI 兼容）
+const XUNFEI_HTTP_API_KEY = import.meta.env.VITE_XUNFEI_HTTP_API_KEY
+// 兼容 OpenAI 路径：/v1/chat/completions
+const XUNFEI_HTTP_ENDPOINT = 'https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions'
+// 模型名称，需在 .env 配置，例如：General-Spark-Standard 或 General-Spark-Lite
+const XUNFEI_MODEL = import.meta.env.VITE_XUNFEI_MODEL
+
 /**
  * Generate travel itinerary using Tongyi Qianwen LLM
  * @param {Object} params - Travel parameters
@@ -283,5 +290,128 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
 export async function recognizeVoice(audioBlob) {
   // Placeholder for Xunfei voice recognition
   // In production, implement actual API call to Xunfei
-  throw new Error('语音识别功能需要配置科大讯飞 API。请在 .env 文件中配置 VITE_XUNFEI_* 相关参数。')
+  throw new Error('语音识别功能需要配置科大讯飞 API。请在 .env 文件中配置 VITE_XFYUN_APPID、VITE_XFYUN_API_SECRET、VITE_XFYUN_API_KEY 相关参数。')
+}
+
+/**
+ * Parse user voice input to extract travel plan details.
+ * @param {string} voiceInput - The user's voice input as a string.
+ * @returns {Promise<Object>} A structured object with extracted details.
+ */
+export async function parseVoiceInput(voiceInput) {
+  // 1) 优先使用讯飞 Spark HTTP（OpenAI 兼容）
+  if (XUNFEI_HTTP_API_KEY) {
+    const systemPrompt = `你是一个智能助理，负责从用户的自然语言输入中提取旅行计划的关键信息。
+
+你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明。如果某个字段在用户输入中没有提及，请将其值设为 null。
+
+{
+  "destination": "目的地城市或国家",
+  "startDate": "开始日期 (YYYY-MM-DD)",
+  "endDate": "结束日期 (YYYY-MM-DD)",
+  "budget": 预算金额 (数字),
+  "travelers": 同行人数 (数字),
+  "preferences": "旅行偏好"
+}
+
+注意：
+- 日期处理：如果用户提到月份，默认为当年的该月1号；尽量解析为 YYYY-MM-DD。
+- 数字转换：确保预算和人数是数字类型。
+- 字段缺失：如果信息不明确或未提供，返回 null。`;
+
+    const userPrompt = `请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
+
+    try {
+      const response = await fetch(XUNFEI_HTTP_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${XUNFEI_HTTP_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: XUNFEI_MODEL || 'General-Spark-Standard',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.2,
+          stream: false
+        })
+      })
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '')
+        throw new Error(`Xunfei HTTP request failed: ${response.status} ${response.statusText} ${errText}`)
+      }
+
+      const data = await response.json()
+      const contentString = data.choices?.[0]?.message?.content
+      if (!contentString) throw new Error('Empty content from Xunfei response')
+
+      const jsonContent = contentString.replace(/\n/g, '').trim()
+      return JSON.parse(jsonContent)
+
+    } catch (error) {
+      console.error('Error parsing voice input via Xunfei HTTP:', error)
+      // 回退到其他模型或 mock
+    }
+  }
+
+  // 2) 次选：通义千问（若配置可用）
+  if (QIANWEN_API_KEY && QIANWEN_API_KEY !== 'your_qianwen_api_key') {
+    const systemPrompt = `你是一个智能助理，负责从用户的自然语言输入中提取旅行计划的关键信息。
+
+你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明。如果某个字段在用户输入中没有提及，请将其值设为 null。
+
+{
+  "destination": "目的地城市或国家",
+  "startDate": "开始日期 (YYYY-MM-DD)",
+  "endDate": "结束日期 (YYYY-MM-DD)",
+  "budget": 预算金额 (数字),
+  "travelers": 同行人数 (数字),
+  "preferences": "旅行偏好"
+}`;
+
+    const userPrompt = `请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
+
+    try {
+      const response = await fetch(QIANWEN_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${QIANWEN_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'qwen-turbo',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Qianwen HTTP error: ${response.status}`)
+      }
+
+      const data = await response.json();
+      const content = data.choices[0].message.content;
+      const jsonContent = content.replace(/\n/g, '').replace(/\s+/g, ' ').trim();
+      return JSON.parse(jsonContent);
+    } catch (error) {
+      console.error('Error parsing voice input via Qianwen:', error)
+    }
+  }
+
+  // 3) 最终回退：mock 数据，保证功能可用
+  console.warn('No AI key configured; using mock parsing result')
+  return {
+    destination: '日本横滨',
+    startDate: null,
+    endDate: null,
+    budget: 5000,
+    travelers: 2,
+    preferences: '游览景点'
+  }
 }

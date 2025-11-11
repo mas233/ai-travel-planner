@@ -1,106 +1,79 @@
-import { useState, useEffect } from 'react'
-import { useAuthStore } from '../store/authStore'
-import { useTravelStore } from '../store/travelStore'
-import { Plane, LogOut, Plus } from 'lucide-react'
-import MapView from '../components/MapView'
-import PlanSelector from '../components/PlanSelector'
-import CreatePlanModal from '../components/CreatePlanModal'
-import PlanDetails from '../components/PlanDetails'
-import './MainPage.css'
+import { useState, useEffect } from 'react';
+import { useAuthStore } from '../store/authStore';
+import { useTravelStore } from '../store/travelStore';
+import { LogOut, ChevronLeft, Menu } from 'lucide-react';
+import PlanSelector from '../components/PlanSelector';
+import PlanDetails from '../components/PlanDetails';
+import CreatePlanModal from '../components/CreatePlanModal';
+import MapView from '../components/MapView';
+import './MainPage.css';
 
 function MainPage() {
-  const { user, signOut } = useAuthStore()
-  const { plans, currentPlan, fetchPlans, setCurrentPlan } = useTravelStore()
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showUserMenu, setShowUserMenu] = useState(false)
+  const { user, signOut } = useAuthStore();
+  const { plans, currentPlan, fetchPlans, setCurrentPlan } = useTravelStore();
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     if (user) {
-      fetchPlans(user.id)
+      fetchPlans(user.id);
     }
-  }, [user, fetchPlans])
+  }, [user, fetchPlans]);
 
   const handleLogout = async () => {
     try {
-      await signOut()
+      await signOut();
     } catch (error) {
-      console.error('Logout error:', error)
+      console.error('Logout error:', error);
     }
-  }
-
-  const getUserInitial = () => {
-    return user?.email?.[0]?.toUpperCase() || 'U'
-  }
+  };
 
   return (
-    <div className="app-container">
-      <header className="header">
-        <div className="header-left">
-          <Plane className="logo" />
-          <h1 className="app-title">AI 旅行规划师</h1>
+    <div className={`main-page-container ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
+      <button className="sidebar-toggle-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
+        {sidebarOpen ? <ChevronLeft size={20} /> : <Menu size={20} />}
+      </button>
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <div className="user-info">
+            <div className="user-avatar">{user?.email?.[0]?.toUpperCase() || 'U'}</div>
+            <span className="user-email">{user?.email}</span>
+          </div>
+          <button onClick={handleLogout} className="logout-button" title="退出登录">
+            <LogOut size={20} />
+          </button>
         </div>
-        <div className="header-right">
-          <div className="user-menu-container">
-            <div 
-              className="user-avatar" 
-              onClick={() => setShowUserMenu(!showUserMenu)}
-            >
-              {getUserInitial()}
-            </div>
-            {showUserMenu && (
-              <div className="user-menu">
-                <div className="user-email">{user?.email}</div>
-                <button onClick={handleLogout} className="logout-btn">
-                  <LogOut size={16} />
-                  退出登录
-                </button>
+        <div className="sidebar-content">
+          <div className="plan-selection-section">
+            <PlanSelector
+              plans={plans}
+              currentPlan={currentPlan}
+              onSelectPlan={setCurrentPlan}
+              onNewPlan={() => setShowCreateModal(true)}
+            />
+          </div>
+          <div className="plan-details-section">
+            {currentPlan ? (
+              <PlanDetails plan={currentPlan} />
+            ) : (
+              <div className="no-plan-selected">
+                <p>请选择一个旅行计划或创建一个新的计划</p>
               </div>
             )}
           </div>
         </div>
-      </header>
-
-      <main className="main-content">
-        <div className="controls-section">
-          <PlanSelector 
-            plans={plans}
-            currentPlan={currentPlan}
-            onSelectPlan={setCurrentPlan}
-          />
-          <button 
-            className="create-plan-btn"
-            onClick={() => setShowCreateModal(true)}
-          >
-            <Plus size={20} />
-            新建旅行计划
-          </button>
-        </div>
-
-        <div className="content-section">
-          <div className="map-container">
-            <MapView plan={currentPlan} />
-          </div>
-          {currentPlan && (
-            <div className="plan-details-container">
-              <PlanDetails plan={currentPlan} />
-            </div>
-          )}
-        </div>
-      </main>
-
-      <footer className="footer">
-        <p>© 2025 AI 旅行规划师 - Powered by AI</p>
-        <p>作者：AI Travel Team</p>
-      </footer>
-
+      </div>
+      <div className="main-content">
+        <MapView plan={currentPlan} />
+      </div>
       {showCreateModal && (
-        <CreatePlanModal 
+        <CreatePlanModal
           onClose={() => setShowCreateModal(false)}
           userId={user.id}
         />
       )}
     </div>
-  )
+  );
 }
 
-export default MainPage
+export default MainPage;

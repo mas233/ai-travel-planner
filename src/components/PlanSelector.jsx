@@ -1,11 +1,12 @@
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, Plus } from 'lucide-react'
 import './PlanSelector.css'
 
-function PlanSelector({ plans, currentPlan, onSelectPlan }) {
+function PlanSelector({ plans, currentPlan, onSelectPlan, onNewPlan }) {
   return (
-    <div className="plan-selector">
-      <select 
-        className="plan-select"
+    <div className="plan-selector-container">
+      <div className="plan-selector">
+        <select 
+          className="plan-select"
         value={currentPlan?.id || ''}
         onChange={(e) => {
           const plan = plans.find(p => p.id === e.target.value)
@@ -22,6 +23,10 @@ function PlanSelector({ plans, currentPlan, onSelectPlan }) {
         ))}
       </select>
       <ChevronDown className="select-icon" size={20} />
+      </div>
+      <button onClick={onNewPlan} className="new-plan-btn" title="创建新计划">
+        <Plus size={20} />
+      </button>
     </div>
   )
 }

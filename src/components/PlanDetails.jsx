@@ -1,32 +1,141 @@
-import { useState, useEffect } from 'react'
-import { useTravelStore } from '../store/travelStore'
-import { Calendar, DollarSign, Users, MapPin, Plus, Trash2 } from 'lucide-react'
-import './PlanDetails.css'
+import { useState, useEffect } from 'react';
+import { useTravelStore } from '../store/travelStore';
+import { Calendar, DollarSign, Users, MapPin, Plus, Trash2, Clock, Hotel, Utensils, Navigation, Lightbulb, Car } from 'lucide-react';
+import './PlanDetails.css';
 
 function PlanDetails({ plan }) {
-  const { fetchExpenses, addExpense } = useTravelStore()
-  const [expenses, setExpenses] = useState([])
-  const [showExpenseForm, setShowExpenseForm] = useState(false)
+  const { fetchExpenses, addExpense } = useTravelStore();
+  const [expenses, setExpenses] = useState([]);
+  const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [newExpense, setNewExpense] = useState({
-    category: '',
+    category: '交通',
     amount: '',
     description: '',
     date: new Date().toISOString().split('T')[0]
-  })
+  });
+  const [activeTab, setActiveTab] = useState('itinerary');
+
+  const safeParseItinerary = (itinerary) => {
+    if (typeof itinerary === 'object' && itinerary !== null) return itinerary;
+    if (typeof itinerary === 'string') {
+      try {
+        return JSON.parse(itinerary);
+      } catch (error) {
+        console.error("Failed to parse itinerary:", error);
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const itineraryData = plan ? safeParseItinerary(plan.itinerary) : null;
+
+  const renderDailyItinerary = () => {
+    if (!itineraryData?.days || itineraryData.days.length === 0) return <p>暂无详细行程安排。</p>;
+
+    return itineraryData.days.map(day => (
+      <div key={day.day} className="day-card">
+        <h4>第 {day.day} 天: {day.theme}</h4>
+        <div className="day-details">
+          <div className="day-section">
+            <h5><Utensils size={16} /> 餐食</h5>
+            <p>早餐: {day.meals.breakfast}</p>
+            <p>午餐: {day.meals.lunch}</p>
+            <p>晚餐: {day.meals.dinner}</p>
+          </div>
+          <div className="day-section">
+            <h5><Hotel size={16} /> 住宿</h5>
+            <p>{day.accommodation.name} ({day.accommodation.area})</p>
+            <p>价格: {day.accommodation.priceRange}</p>
+          </div>
+          <div className="day-section">
+            <h5><Navigation size={16} /> 当日交通</h5>
+            <p>{day.transportation.type} (约 ¥{day.transportation.estimatedCost})</p>
+          </div>
+        </div>
+        <h5><MapPin size={16} /> 地点与活动</h5>
+        <div className="timeline">
+          {day.locations.map((loc, index) => (
+            <div key={index} className="timeline-item">
+              <div className="timeline-time"><Clock size={14} /> {loc.time}</div>
+              <div className="timeline-content">
+                <strong>{loc.name}</strong>
+                <p>{loc.description}</p>
+                {loc.tips && <p className="tips"><Lightbulb size={14} /> {loc.tips}</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    ));
+  };
+
+  const renderBudget = () => {
+    if (!itineraryData?.budgetBreakdown) return <p>暂无预算分析。</p>;
+
+    const totalBudget = Object.values(itineraryData.budgetBreakdown).reduce((sum, val) => sum + val, 0);
+
+    return (
+      <div className="budget-analysis-grid">
+        {Object.entries(itineraryData.budgetBreakdown).map(([key, value]) => {
+          const percentage = totalBudget > 0 ? ((value / totalBudget) * 100).toFixed(1) : 0;
+          return (
+            <div key={key} className="budget-item-card">
+              <div className="budget-item-header">
+                <span>{key.charAt(0).toUpperCase() + key.slice(1)}</span>
+                <strong>¥{value.toLocaleString()}</strong>
+              </div>
+              <div className="progress-bar">
+                <div className="progress" style={{width: `${percentage}%`}}></div>
+              </div>
+              <span className="percentage">{percentage}%</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderTransport = () => {
+    if (!itineraryData?.transportation) return <p>暂无交通安排。</p>;
+    return (
+      <div className="transport-grid">
+        <div className="transport-card">
+          <h5><Car size={18} /> 往返交通</h5>
+          <p>{itineraryData.transportation.toDestination}</p>
+        </div>
+        <div className="transport-card">
+          <h5><Navigation size={18} /> 当地交通</h5>
+          <p>{itineraryData.transportation.local}</p>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTips = () => {
+    if (!itineraryData?.tips || itineraryData.tips.length === 0) return <p>暂无旅行贴士。</p>;
+    return (
+      <ul className="tips-list">
+        {itineraryData.tips.map((tip, index) => (
+          <li key={index}><Lightbulb size={16} /> {tip}</li>
+        ))}
+      </ul>
+    );
+  };
 
   useEffect(() => {
     if (plan?.id) {
-      loadExpenses()
+      loadExpenses();
     }
-  }, [plan?.id])
+  }, [plan?.id]);
 
   const loadExpenses = async () => {
-    const data = await fetchExpenses(plan.id)
-    setExpenses(data)
-  }
+    const data = await fetchExpenses(plan.id);
+    setExpenses(data);
+  };
 
   const handleAddExpense = async (e) => {
-    e.preventDefault()
+    e.preventDefault();
     try {
       await addExpense({
         plan_id: plan.id,
@@ -34,23 +143,30 @@ function PlanDetails({ plan }) {
         amount: parseFloat(newExpense.amount),
         description: newExpense.description,
         date: newExpense.date
-      })
-      setNewExpense({
-        category: '',
-        amount: '',
-        description: '',
-        date: new Date().toISOString().split('T')[0]
-      })
-      setShowExpenseForm(false)
-      loadExpenses()
+      });
+      setNewExpense({ category: '', amount: '', description: '', date: new Date().toISOString().split('T')[0] });
+      setShowExpenseForm(false);
+      loadExpenses();
     } catch (error) {
-      console.error('Error adding expense:', error)
-      alert('添加开销失败')
+      console.error('Error adding expense:', error);
+      alert('添加开销失败');
     }
-  }
+  };
 
-  const totalExpenses = expenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0)
-  const remainingBudget = plan.budget - totalExpenses
+  const totalExpenses = expenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
+  const remainingBudget = plan.budget - totalExpenses;
+
+  const budgetCategories = [
+    '交通', '住宿', '餐饮', '购物', '娱乐', '其他'
+  ];
+
+  if (!plan) {
+    return (
+      <div className="plan-details-placeholder">
+        <p>请从左侧选择一个旅行计划以查看详情。</p>
+      </div>
+    );
+  }
 
   return (
     <div className="plan-details">
@@ -60,22 +176,10 @@ function PlanDetails({ plan }) {
 
       <div className="details-content">
         <div className="info-section">
-          <div className="info-item">
-            <MapPin size={18} />
-            <span>{plan.destination}</span>
-          </div>
-          <div className="info-item">
-            <Calendar size={18} />
-            <span>{plan.start_date} 至 {plan.end_date}</span>
-          </div>
-          <div className="info-item">
-            <Users size={18} />
-            <span>{plan.travelers} 人</span>
-          </div>
-          <div className="info-item">
-            <DollarSign size={18} />
-            <span>预算: ¥{plan.budget?.toLocaleString()}</span>
-          </div>
+          <div className="info-item"><MapPin size={16} /> <span>{plan.destination}</span></div>
+          <div className="info-item"><Calendar size={16} /> <span>{plan.start_date} to {plan.end_date}</span></div>
+          <div className="info-item"><Users size={16} /> <span>{plan.travelers} 人</span></div>
+          <div className="info-item"><DollarSign size={16} /> <span>预算: ¥{plan.budget?.toLocaleString()}</span></div>
         </div>
 
         {plan.preferences && (
@@ -85,102 +189,56 @@ function PlanDetails({ plan }) {
           </div>
         )}
 
-        {plan.itinerary?.days && (
-          <div className="itinerary-section">
-            <h3>行程安排</h3>
-            <div className="days-list">
-              {plan.itinerary.days.map((day, index) => (
-                <div key={index} className="day-item">
-                  <div className="day-header">
-                    <strong>第 {day.day} 天</strong>
-                    {day.theme && <span className="day-theme">{day.theme}</span>}
-                  </div>
-                  {day.locations && (
-                    <ul className="locations-list">
-                      {day.locations.map((loc, locIndex) => (
-                        <li key={locIndex}>
-                          <strong>{loc.name || loc.place}</strong>
-                          {loc.description && (
-                            <p className="location-desc">{loc.description}</p>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <div className="tabs">
+          <button className={`tab-button ${activeTab === 'itinerary' ? 'active' : ''}`} onClick={() => setActiveTab('itinerary')}>详细行程</button>
+          <button className={`tab-button ${activeTab === 'budget' ? 'active' : ''}`} onClick={() => setActiveTab('budget')}>预算分析</button>
+          <button className={`tab-button ${activeTab === 'transport' ? 'active' : ''}`} onClick={() => setActiveTab('transport')}>交通安排</button>
+          <button className={`tab-button ${activeTab === 'tips' ? 'active' : ''}`} onClick={() => setActiveTab('tips')}>旅行贴士</button>
+        </div>
+
+        <div className="tab-content">
+          {activeTab === 'itinerary' && <div className="itinerary-section">{renderDailyItinerary()}</div>}
+          {activeTab === 'budget' && <div className="itinerary-section">{renderBudget()}</div>}
+          {activeTab === 'transport' && <div className="itinerary-section">{renderTransport()}</div>}
+          {activeTab === 'tips' && <div className="itinerary-section">{renderTips()}</div>}
+        </div>
 
         <div className="expenses-section">
           <div className="section-header">
             <h3>费用记录</h3>
-            <button 
-              className="add-expense-btn"
-              onClick={() => setShowExpenseForm(!showExpenseForm)}
-            >
-              <Plus size={16} />
-              添加开销
-            </button>
+            <button className="add-expense-btn-small" onClick={() => setShowExpenseForm(!showExpenseForm)}><Plus size={16} /></button>
           </div>
-
           <div className="budget-summary">
-            <div className="budget-item">
-              <span>总预算</span>
-              <strong>¥{plan.budget?.toLocaleString()}</strong>
-            </div>
-            <div className="budget-item">
-              <span>已花费</span>
-              <strong className="spent">¥{totalExpenses.toLocaleString()}</strong>
-            </div>
-            <div className="budget-item">
-              <span>剩余</span>
-              <strong className={remainingBudget < 0 ? 'over-budget' : 'remaining'}>
-                ¥{remainingBudget.toLocaleString()}
-              </strong>
-            </div>
+            <div className="budget-item"><span>总预算</span><strong>¥{plan.budget?.toLocaleString()}</strong></div>
+            <div className="budget-item"><span>已花费</span><strong className="spent">¥{totalExpenses.toLocaleString()}</strong></div>
+            <div className="budget-item"><span>剩余</span><strong className={remainingBudget < 0 ? 'over-budget' : 'remaining'}>¥{remainingBudget.toLocaleString()}</strong></div>
           </div>
-
           {showExpenseForm && (
             <form className="expense-form" onSubmit={handleAddExpense}>
-              <input
-                type="text"
-                placeholder="类别（如：餐饮、交通）"
-                value={newExpense.category}
-                onChange={(e) => setNewExpense({...newExpense, category: e.target.value})}
-                required
-              />
-              <input
-                type="number"
-                placeholder="金额"
-                value={newExpense.amount}
-                onChange={(e) => setNewExpense({...newExpense, amount: e.target.value})}
-                required
-                step="0.01"
-                min="0"
-              />
-              <input
-                type="text"
-                placeholder="说明"
-                value={newExpense.description}
-                onChange={(e) => setNewExpense({...newExpense, description: e.target.value})}
-              />
-              <input
-                type="date"
-                value={newExpense.date}
-                onChange={(e) => setNewExpense({...newExpense, date: e.target.value})}
-                required
-              />
+              <div className="form-group">
+                <label htmlFor="category">类别</label>
+                <select id="category" value={newExpense.category} onChange={(e) => setNewExpense({...newExpense, category: e.target.value})} required>
+                  {budgetCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label htmlFor="amount">金额</label>
+                <input id="amount" type="number" placeholder="金额" value={newExpense.amount} onChange={(e) => setNewExpense({...newExpense, amount: e.target.value})} required />
+              </div>
+              <div className="form-group full-width">
+                <label htmlFor="description">说明</label>
+                <input id="description" type="text" placeholder="说明" value={newExpense.description} onChange={(e) => setNewExpense({...newExpense, description: e.target.value})} />
+              </div>
+              <div className="form-group full-width">
+                <label htmlFor="date">日期</label>
+                <input id="date" type="date" value={newExpense.date} onChange={(e) => setNewExpense({...newExpense, date: e.target.value})} required />
+              </div>
               <div className="form-actions">
-                <button type="button" onClick={() => setShowExpenseForm(false)}>
-                  取消
-                </button>
+                <button type="button" onClick={() => setShowExpenseForm(false)}>取消</button>
                 <button type="submit">保存</button>
               </div>
             </form>
           )}
-
           <div className="expenses-list">
             {expenses.length === 0 ? (
               <p className="no-expenses">暂无开销记录</p>
@@ -189,10 +247,12 @@ function PlanDetails({ plan }) {
                 <div key={expense.id} className="expense-item">
                   <div className="expense-info">
                     <strong>{expense.category}</strong>
-                    <span className="expense-desc">{expense.description}</span>
+                    <span>{expense.description}</span>
+                  </div>
+                  <div className="expense-amount">
+                    <span>¥{parseFloat(expense.amount).toLocaleString()}</span>
                     <span className="expense-date">{expense.date}</span>
                   </div>
-                  <div className="expense-amount">¥{parseFloat(expense.amount).toLocaleString()}</div>
                 </div>
               ))
             )}
@@ -200,7 +260,7 @@ function PlanDetails({ plan }) {
         </div>
       </div>
     </div>
-  )
+  );
 }
 
-export default PlanDetails
+export default PlanDetails;
