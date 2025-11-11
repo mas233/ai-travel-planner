@@ -15,6 +15,16 @@ function PlanDetails({ plan }) {
   });
   const [activeTab, setActiveTab] = useState('itinerary');
 
+  // Emit a segment navigation event for MapView to listen and draw route
+  const triggerSegmentRoute = (fromName, toName) => {
+    if (!fromName || !toName) return;
+    try {
+      window.dispatchEvent(new CustomEvent('map:routeSegment', { detail: { from: fromName, to: toName } }));
+    } catch (err) {
+      console.error('Failed to dispatch route segment event:', err);
+    }
+  };
+
   const safeParseItinerary = (itinerary) => {
     if (typeof itinerary === 'object' && itinerary !== null) return itinerary;
     if (typeof itinerary === 'string') {
@@ -62,6 +72,15 @@ function PlanDetails({ plan }) {
                 <strong>{loc.name}</strong>
                 <p>{loc.description}</p>
                 {loc.tips && <p className="tips"><Lightbulb size={14} /> {loc.tips}</p>}
+                {index < day.locations.length - 1 && (
+                  <button
+                    className="route-segment-btn"
+                    title="导航至下一地点"
+                    onClick={() => triggerSegmentRoute(loc.name || loc.place, day.locations[index + 1].name || day.locations[index + 1].place)}
+                  >
+                    <Navigation size={14} /> 导航至下一地点
+                  </button>
+                )}
               </div>
             </div>
           ))}

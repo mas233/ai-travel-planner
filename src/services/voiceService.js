@@ -1,365 +1,339 @@
+/*
+ * 讯飞录音文件转写（标准版）
+ * ------------------------
+ * 录音 → 临时文件 → 上传接口（upload）→ 轮询结果接口（getResult）→ 文本
+ * 严格按照官方文档参数与签名计算，确保无论成功/失败都清理临时资源。
+ */
+
 import CryptoJS from 'crypto-js';
 
-// 使用与 .env 一致的变量名（XUNFEI 前缀）
-const APPID = import.meta.env.VITE_XUNFEI_APP_ID;
-const API_SECRET = import.meta.env.VITE_XUNFEI_API_SECRET;
-const API_KEY = import.meta.env.VITE_XUNFEI_API_KEY;
+// Xunfei Long Form ASR endpoints & credentials
+// Use local proxy in dev to avoid CORS
+const XF_UPLOAD_URL    = import.meta.env.DEV ? '/xf/upload'    : 'https://raasr.xfyun.cn/v2/api/upload';
+const XF_GETRESULT_URL = import.meta.env.DEV ? '/xf/getResult' : 'https://raasr.xfyun.cn/v2/api/getResult';
+const XF_SECRET_KEY    = import.meta.env.VITE_XUNFEI_SECRET_KEY;
+// User requires appid env name `CITE_XUNFEI_APP_ID`; also accept `VITE_XUNFEI_APP_ID` as fallback
+const XF_APP_ID        = import.meta.env.CITE_XUNFEI_APP_ID || import.meta.env.VITE_XUNFEI_APP_ID;
 
-// IAT 配置与音频常量（严格依据 raw.txt 文档，可通过 .env 覆盖）
-const IAT_HOST = import.meta.env.VITE_XUNFEI_IAT_HOST || 'iat.xf-yun.com';
-const IAT_PATH = import.meta.env.VITE_XUNFEI_IAT_PATH || '/v1';
-const IAT_WS_URL = `wss://${IAT_HOST}${IAT_PATH}`;
-// 业务参数（按文档：domain=slm, language=zh_cn, accent=mandarin, eos=6000 默认）
-const IAT_LANGUAGE = import.meta.env.VITE_XUNFEI_IAT_LANGUAGE || 'zh_cn';
-const IAT_ACCENT = import.meta.env.VITE_XUNFEI_IAT_ACCENT || 'mandarin';
-const IAT_DOMAIN = import.meta.env.VITE_XUNFEI_IAT_DOMAIN || 'slm';
-const IAT_VAD_EOS = Number(import.meta.env.VITE_XUNFEI_IAT_VAD_EOS || 6000);
+// Audio conversion helpers
 const TARGET_SAMPLE_RATE = 16000;
-const PROCESSOR_BUFFER_SIZE = 4096;
-// 按文档建议：每次发送音频间隔40ms，每次发送字节数为一帧音频大小的整数倍（PCM16 16k 单声道 40ms => 640采样 => 1280字节）
-const FRAME_INTERVAL_MS = 40;
-const FRAME_SIZE_BYTES = 1280;
 
-// 将 Float32 PCM 转为 16-bit PCM（小端）
-function floatTo16BitPCM(float32Array) {
-  const buffer = new ArrayBuffer(float32Array.length * 2);
-  const view = new DataView(buffer);
-  let offset = 0;
-  for (let i = 0; i < float32Array.length; i++, offset += 2) {
-    let s = Math.max(-1, Math.min(1, float32Array[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+function float32ToPCM16(float32) {
+  const buf = new ArrayBuffer(float32.length * 2);
+  const view = new DataView(buf);
+  for (let i = 0; i < float32.length; ++i) {
+    let s = Math.max(-1, Math.min(1, float32[i]));
+    s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    view.setInt16(i * 2, s, true);
   }
-  return new Uint8Array(buffer);
+  return new Uint8Array(buf);
 }
 
-// 简单降采样到 16k（均值抽取法）
-function downsampleBuffer(buffer, sampleRate, outSampleRate = TARGET_SAMPLE_RATE) {
-  if (outSampleRate === sampleRate) return buffer;
-  const sampleRateRatio = sampleRate / outSampleRate;
-  const newLength = Math.round(buffer.length / sampleRateRatio);
-  const result = new Float32Array(newLength);
-  let offsetResult = 0;
-  let offsetBuffer = 0;
-  while (offsetResult < result.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-    let accum = 0, count = 0;
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-      accum += buffer[i];
-      count++;
+function downsample(buffer, inRate, outRate = TARGET_SAMPLE_RATE) {
+  if (inRate === outRate) return buffer;
+  const ratio = inRate / outRate;
+  const newLen = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLen);
+  let offset = 0;
+  for (let i = 0; i < newLen; ++i) {
+    const nextOffset = Math.round((i + 1) * ratio);
+    let sum = 0;
+    let count = 0;
+    for (let j = offset; j < nextOffset && j < buffer.length; ++j) {
+      sum += buffer[j];
+      ++count;
     }
-    result[offsetResult] = accum / Math.max(1, count);
-    offsetResult++;
-    offsetBuffer = nextOffsetBuffer;
+    result[i] = count ? (sum / count) : 0;
+    offset = nextOffset;
   }
   return result;
 }
 
-class XunfeiVoiceService {
-  constructor() {
-    this.appId = APPID;
-    this.apiSecret = API_SECRET;
-    this.apiKey = API_KEY;
-    this.socket = null;
-    this.recorder = null; // 兼容旧字段
-    this.audioContext = null;
-    this.mediaStream = null;
-    this.sourceNode = null;
-    this.processorNode = null;
-    this.hasSentStartFrame = false;
-    this.audioData = [];
-    this.resultText = '';
-    this.onResult = null;
-    this.onError = null;
-    this.onEnd = null;
-    this.seq = 0; // 文档允许0-999999，首帧从0开始
-    // 分片发送队列
-    this._byteQueue = [];
-    this._byteQueueLen = 0;
-    this._flushTimer = null;
+function pcm16ToWav(pcm16, sampleRate = TARGET_SAMPLE_RATE) {
+  const numChannels = 1;
+  const bytesPerSample = 2;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcm16.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  // RIFF header
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, 'WAVE');
+
+  // fmt chunk
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);          // PCM chunk size
+  view.setUint16(20, 1, true);           // format = 1 (PCM)
+  view.setUint16(22, numChannels, true); // channels
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);          // bits per sample
+
+  // data chunk
+  writeString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < pcm16.length; ++i) {
+    view.setInt16(offset, pcm16[i], true);
+    offset += 2;
   }
 
-  isConfigured() {
-    return Boolean(this.appId && this.apiSecret && this.apiKey);
-  }
+  return new Blob([view], { type: 'audio/wav' });
 
-  getWebSocketUrl() {
-    // Validate environment configuration before generating the URL
-    if (!this.appId || !this.apiSecret || !this.apiKey) {
-      throw new Error(
-        '科大讯飞语音识别未正确配置：请在 .env 设置 VITE_XUNFEI_APP_ID、VITE_XUNFEI_API_SECRET、VITE_XUNFEI_API_KEY，并重启开发服务器（或重新加载页面）。'
-      );
+  function writeString(dv, offset, str) {
+    for (let i = 0; i < str.length; ++i) {
+      dv.setUint8(offset + i, str.charCodeAt(i));
     }
-
-    const url = IAT_WS_URL;
-    const host = IAT_HOST;
-    const date = new Date().toUTCString();
-    const algorithm = 'hmac-sha256';
-    const headers = 'host date request-line';
-    const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${IAT_PATH} HTTP/1.1`;
-    const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, this.apiSecret);
-    const signature = CryptoJS.enc.Base64.stringify(signatureSha);
-    const authorizationOrigin = `api_key="${this.apiKey}", algorithm="${algorithm}", headers="${headers}", signature="${signature}"`;
-    const authorization = btoa(authorizationOrigin);
-    // 严格对齐raw.txt示例：authorization原样；date进行URL编码；host不编码
-    return `${url}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
-  }
-
-  start(onResult, onError, onEnd) {
-    this.onResult = onResult;
-    this.onError = onError;
-    this.onEnd = onEnd;
-    this.resultText = '';
-    if (!this.isConfigured()) {
-      this.handleError(
-        new Error('语音识别未配置：请在 .env 设置 VITE_XUNFEI_APP_ID、VITE_XUNFEI_API_SECRET、VITE_XUNFEI_API_KEY，或改用文本输入与“智能填充”。')
-      );
-      return;
-    }
-    let wsUrl;
-    try {
-      wsUrl = this.getWebSocketUrl();
-    } catch (err) {
-      this.handleError(err);
-      return;
-    }
-    this.socket = new WebSocket(wsUrl);
-
-    this.socket.onopen = () => {
-      this.startRecording();
-    };
-
-    this.socket.onmessage = (event) => {
-      try {
-        const res = JSON.parse(event.data);
-        const header = res.header || {};
-        const payload = res.payload || {};
-        if (header.code !== 0) {
-          const friendly = `[${header.code}] ${header.message || '错误'}：请按文档检查 APP_ID、APIKey、APISecret 是否对应 ws(s)://iat.xf-yun.com/v1，并确保已在控制台创建 WebAPI 平台应用并添加语音听写（流式版）服务。`;
-          this.handleError(new Error(friendly));
-          return;
-        }
-        const result = payload.result;
-        if (result && typeof result.text === 'string') {
-          // 文档规定：payload.result.text 为 base64 的 JSON，包含 ws/cw/w 等
-          try {
-            const decoded = atob(result.text);
-            const json = JSON.parse(decoded);
-            if (Array.isArray(json.ws)) {
-              const words = json.ws.map(seg => (seg.cw && seg.cw[0] ? seg.cw[0].w : '')).join('');
-              this.resultText += words;
-              if (this.onResult) this.onResult(this.resultText);
-            }
-            // 若 ls=true 表示最后结果
-            if (json.ls === true || result.status === 2 || header.status === 2) {
-              this.cleanup();
-              if (this.onEnd) this.onEnd(this.resultText);
-            }
-          } catch (e) {
-            // 解码失败直接忽略，但仍根据 header.status 判断结束
-            if (header.status === 2) {
-              this.cleanup();
-              if (this.onEnd) this.onEnd(this.resultText);
-            }
-          }
-        } else if (header.status === 2) {
-          // 没有 result.text，但会话已结束
-          this.cleanup();
-          if (this.onEnd) this.onEnd(this.resultText);
-        }
-      } catch (e) {
-        this.handleError(e);
-      }
-    };
-
-    this.socket.onerror = (error) => {
-      this.handleError(error);
-    };
-
-    this.socket.onclose = () => {
-      // 已在 status=2 时触发 onEnd，这里不重复回调
-    };
-  }
-
-  stop() {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      const endFrame = {
-        header: { app_id: this.appId, status: 2 },
-        payload: {
-          audio: {
-            encoding: 'raw', sample_rate: 16000, channels: 1, bit_depth: 16,
-            seq: this.seq++, status: 2, audio: ''
-          }
-        }
-      };
-      this.socket.send(JSON.stringify(endFrame));
-    }
-    this.cleanup();
-  }
-
-  cleanup() {
-    try {
-      if (this.processorNode) {
-        this.processorNode.disconnect();
-        this.processorNode.onaudioprocess = null;
-        this.processorNode = null;
-      }
-      if (this.sourceNode) {
-        this.sourceNode.disconnect();
-        this.sourceNode = null;
-      }
-      if (this.audioContext) {
-        this.audioContext.close().catch(() => {});
-        this.audioContext = null;
-      }
-      if (this.mediaStream) {
-        this.mediaStream.getTracks().forEach(t => t.stop());
-        this.mediaStream = null;
-      }
-      if (this.socket) {
-        try { this.socket.close(); } catch (e) {}
-        this.socket = null;
-      }
-      this.hasSentStartFrame = false;
-      this.recorder = null;
-      this._byteQueue = [];
-      this._byteQueueLen = 0;
-      if (this._flushTimer) {
-        clearInterval(this._flushTimer);
-        this._flushTimer = null;
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  handleError(error) {
-    if (this.onError) {
-      this.onError(error);
-    }
-    this.stop();
-  }
-
-  startRecording() {
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      this.mediaStream = stream;
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      this.audioContext = new AudioContext();
-      this.sourceNode = this.audioContext.createMediaStreamSource(stream);
-      this.processorNode = this.audioContext.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1);
-
-      this.recorder = this.processorNode; // 兼容旧字段
-
-      this.processorNode.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const downsampled = downsampleBuffer(inputData, this.audioContext.sampleRate, TARGET_SAMPLE_RATE);
-        const pcm16 = floatTo16BitPCM(downsampled);
-        this._appendBytes(pcm16);
-      };
-
-      this.sourceNode.connect(this.processorNode);
-      this.processorNode.connect(this.audioContext.destination);
-
-      // 定时按40ms发送1280字节的分片
-      if (this._flushTimer) clearInterval(this._flushTimer);
-      this._flushTimer = setInterval(() => {
-        this._flushFrameChunk();
-      }, FRAME_INTERVAL_MS);
-    }).catch(error => {
-      this.handleError(error);
-    });
-  }
-
-  // 追加PCM字节到队列
-  _appendBytes(uint8arr) {
-    if (!uint8arr || !uint8arr.length) return;
-    this._byteQueue.push(uint8arr);
-    this._byteQueueLen += uint8arr.length;
-  }
-
-  // 从队列取指定字节数
-  _takeBytes(n) {
-    if (this._byteQueueLen < n) return null;
-    let need = n;
-    const chunks = [];
-    while (need > 0 && this._byteQueue.length) {
-      const head = this._byteQueue[0];
-      if (head.length <= need) {
-        chunks.push(head);
-        this._byteQueue.shift();
-        this._byteQueueLen -= head.length;
-        need -= head.length;
-      } else {
-        const part = head.subarray(0, need);
-        const rest = head.subarray(need);
-        chunks.push(part);
-        this._byteQueue[0] = rest;
-        this._byteQueueLen -= need;
-        need = 0;
-      }
-    }
-    // 合并
-    const out = new Uint8Array(n);
-    let offset = 0;
-    for (const c of chunks) {
-      out.set(c, offset);
-      offset += c.length;
-    }
-    return out;
-  }
-
-  _bytesToBase64(uint8arr) {
-    let binary = '';
-    const len = uint8arr.length;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(uint8arr[i]);
-    }
-    return btoa(binary);
-  }
-
-  _flushFrameChunk() {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-    // 必须满足一帧1280字节
-    const chunk = this._takeBytes(FRAME_SIZE_BYTES);
-    if (!chunk) return;
-    const base64Audio = this._bytesToBase64(chunk);
-
-    if (!this.hasSentStartFrame) {
-      const startFrame = {
-        header: { app_id: this.appId, status: 0 },
-        parameter: {
-          iat: {
-            domain: IAT_DOMAIN,
-            language: IAT_LANGUAGE,
-            accent: IAT_ACCENT,
-            eos: IAT_VAD_EOS,
-            vinfo: 1,
-            dwa: 'wpgs',
-            result: { encoding: 'utf8', compress: 'raw', format: 'json' }
-          }
-        },
-        payload: {
-          audio: {
-            encoding: 'raw', sample_rate: 16000, channels: 1, bit_depth: 16,
-            seq: this.seq++, status: 0, audio: base64Audio
-          }
-        }
-      };
-      this.socket.send(JSON.stringify(startFrame));
-      this.hasSentStartFrame = true;
-      return;
-    }
-
-    const streamFrame = {
-      header: { app_id: this.appId, status: 1 },
-      payload: {
-        audio: {
-          encoding: 'raw', sample_rate: 16000, channels: 1, bit_depth: 16,
-          seq: this.seq++, status: 1, audio: base64Audio
-        }
-      }
-    };
-    this.socket.send(JSON.stringify(streamFrame));
   }
 }
 
-export default new XunfeiVoiceService();
+async function blobToWav(blob) {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  try {
+    const buf = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(buf);
+    const channel = audioBuffer.getChannelData(0);
+    const down = downsample(channel, audioBuffer.sampleRate, TARGET_SAMPLE_RATE);
+    const pcm16 = float32ToPCM16(down);
+    // Convert to Int16 array for WAV writer
+    const pcm16View = new Int16Array(pcm16.buffer);
+    const wavBlob = pcm16ToWav(pcm16View, TARGET_SAMPLE_RATE);
+    const durationMs = Math.round(audioBuffer.duration * 1000);
+    return { wavBlob, durationMs };
+  } finally {
+    audioCtx.close().catch(() => {});
+  }
+}
+
+// Build signa per doc: base64(HmacSHA1(MD5(appid + ts), secret_key))
+function buildSigna(appId, ts, secretKey) {
+  const md5Str = CryptoJS.MD5(`${appId}${ts}`).toString();
+  const hmac = CryptoJS.HmacSHA1(md5Str, secretKey);
+  return CryptoJS.enc.Base64.stringify(hmac);
+}
+
+function nowTs() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function toUrlParams(obj) {
+  const usp = new URLSearchParams();
+  Object.entries(obj).forEach(([k, v]) => {
+    if (v !== undefined && v !== null) usp.append(k, String(v));
+  });
+  return usp.toString();
+}
+
+class VoiceService {
+  constructor() {
+    this.onResult = null;
+    this.onError  = null;
+    this.onEnd    = null;
+
+    this._mediaStream = null;
+    this._recorder    = null;
+    this._chunks      = [];
+    this._tmpUrl      = null;
+  }
+
+  isConfigured() {
+    return Boolean(XF_SECRET_KEY && XF_APP_ID);
+  }
+
+  start(onResult, onError, onEnd) {
+    if (onResult) this.onResult = onResult;
+    if (onError)  this.onError  = onError;
+    if (onEnd)    this.onEnd    = onEnd;
+
+    if (!this.isConfigured()) {
+      if (this.onError) this.onError(new Error('语音识别未配置：缺少 CITE_XUNFEI_APP_ID 或 VITE_XUNFEI_SECRET_KEY'));
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      this._mediaStream = stream;
+      const mime = this._selectMime();
+      this._recorder = new MediaRecorder(stream, { mimeType: mime });
+      this._chunks = [];
+
+      this._recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) this._chunks.push(e.data);
+      };
+      this._recorder.onerror = (e) => {
+        this._handleError(e?.error || new Error('录音失败'));
+      };
+      this._recorder.onstop = () => {
+        // Build temp file(blob)
+        const blob = new Blob(this._chunks, { type: this._recorder.mimeType });
+        this._tmpUrl = URL.createObjectURL(blob);
+        // Upload then poll result per Xunfei API
+        this._uploadAndGetResult(blob).finally(() => {
+          // Cleanup temp file regardless of success/failure
+          if (this._tmpUrl) {
+            try { URL.revokeObjectURL(this._tmpUrl); } catch (_) {}
+            this._tmpUrl = null;
+          }
+          this._finalizeStream();
+        });
+      };
+
+      try {
+        this._recorder.start();
+      } catch (e) {
+        this._handleError(e);
+      }
+    }).catch(err => this._handleError(err));
+  }
+
+  stop() {
+    // Stop recording; onstop will trigger transcription
+    try {
+      if (this._recorder && this._recorder.state !== 'inactive') {
+        this._recorder.stop();
+      }
+    } catch (e) {
+      this._handleError(e);
+    }
+  }
+
+  _selectMime() {
+    const canWav = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/wav');
+    if (canWav) return 'audio/wav';
+    const canWebm = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm');
+    if (canWebm) return 'audio/webm';
+    return undefined; // let browser choose
+  }
+
+  async _uploadAndGetResult(srcBlob) {
+    try {
+      // Convert to target WAV and read duration
+      const { wavBlob, durationMs } = await blobToWav(srcBlob);
+
+      const ts1 = nowTs();
+      const signa1 = buildSigna(XF_APP_ID, ts1, XF_SECRET_KEY);
+      const fileName = 'recording.wav';
+      const fileSize = wavBlob.size;
+      const uploadParams = {
+        appId: XF_APP_ID,
+        ts: ts1,
+        // signa should be base64; let URLSearchParams do single encoding
+        signa: signa1,
+        fileName,
+        fileSize,
+        duration: durationMs,
+        language: 'cn',
+        audioMode: 'fileStream',
+        standardWav: 1,
+      };
+      const uploadUrl = `${XF_UPLOAD_URL}?${toUrlParams(uploadParams)}`;
+
+      const uploadResp = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: wavBlob
+      });
+      const uploadText = await uploadResp.text();
+      if (!uploadResp.ok) {
+        throw new Error(`Upload失败：${uploadResp.status} ${uploadResp.statusText} ${uploadText}`);
+      }
+      let uploadJson = null;
+      try { uploadJson = JSON.parse(uploadText); } catch (_) {}
+      const orderId = uploadJson?.orderId || uploadJson?.data?.orderId;
+      if (!orderId) throw new Error(`Upload成功但未返回orderId：${uploadText}`);
+
+      // Poll getResult until完成
+      const maxTries = 20;
+      const delayMs = 1500;
+      for (let i = 0; i < maxTries; i++) {
+        const ts2 = nowTs();
+        const signa2 = buildSigna(XF_APP_ID, ts2, XF_SECRET_KEY);
+        const query = toUrlParams({
+          appId: XF_APP_ID,
+          ts: ts2,
+          signa: signa2,
+          orderId
+        });
+        const resultUrl = `${XF_GETRESULT_URL}?${query}`;
+        const resResp = await fetch(resultUrl, { method: 'GET' });
+        const resText = await resResp.text();
+        if (!resResp.ok) {
+          throw new Error(`getResult失败：${resResp.status} ${resResp.statusText} ${resText}`);
+        }
+        let resJson = null;
+        try { resJson = JSON.parse(resText); } catch (_) {}
+        const status = resJson?.orderInfo?.status;
+        if (status === 4) {
+          const text = extractTextFromOrderResult(resJson?.orderResult);
+          if (!text) throw new Error('转写完成但未解析到文本结果');
+          if (this.onResult) this.onResult(text);
+          if (this.onEnd) this.onEnd(text);
+          return;
+        }
+        if (status === -1) {
+          const failType = resJson?.orderInfo?.failType;
+          throw new Error(`转写失败，status=-1，failType=${failType ?? '未知'}`);
+        }
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+      throw new Error('转写结果查询超时，请稍后重试');
+    } catch (err) {
+      this._handleError(err);
+    }
+  }
+
+  _handleError(err) {
+    if (this.onError) this.onError(err);
+    // Ensure temp file cleanup and stream shutdown
+    if (this._tmpUrl) {
+      try { URL.revokeObjectURL(this._tmpUrl); } catch (_) {}
+      this._tmpUrl = null;
+    }
+    this._finalizeStream();
+  }
+
+  _finalizeStream() {
+    try {
+      if (this._mediaStream) {
+        this._mediaStream.getTracks().forEach(t => t.stop());
+      }
+    } catch (_) {}
+    this._mediaStream = null;
+    this._recorder = null;
+    this._chunks = [];
+  }
+}
+
+export default new VoiceService();
+
+// Extract plain text from Xunfei orderResult
+function extractTextFromOrderResult(orderResult) {
+  if (!orderResult) return '';
+  let obj = orderResult;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj); } catch (_) {}
+  }
+  if (!obj) return typeof orderResult === 'string' ? orderResult : '';
+  const lattices = obj.lattice || obj.lattice2 || [];
+  const pieces = [];
+  for (const item of lattices) {
+    if (!item?.json_1best) continue;
+    let one = null;
+    try { one = JSON.parse(item.json_1best); } catch (_) {}
+    if (!one?.st?.rt) continue;
+    for (const rt of one.st.rt) {
+      if (!rt?.ws) continue;
+      for (const ws of rt.ws) {
+        if (!ws?.cw || !ws.cw.length) continue;
+        const best = ws.cw[0];
+        if (best?.w) pieces.push(best.w);
+      }
+    }
+  }
+  return pieces.join('');
+}

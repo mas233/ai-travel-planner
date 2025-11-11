@@ -1,157 +1,72 @@
-import { useEffect, useRef } from 'react'
-import AMapLoader from '@amap/amap-jsapi-loader'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './MapView.css'
+import { AMapItinerary } from './AMapItinerary'
 
 function MapView({ plan }) {
-  const mapRef = useRef(null)
-  const mapInstanceRef = useRef(null)
-  const markersRef = useRef([])
-
-  useEffect(() => {
-    const initMap = async () => {
-      try {
-        const AMap = await AMapLoader.load({
-          key: import.meta.env.VITE_AMAP_KEY || 'your-amap-key',
-          version: '2.0',
-          plugins: ['AMap.Geocoder', 'AMap.Marker', 'AMap.Polyline', 'AMap.Driving']
-        })
-
-        if (mapInstanceRef.current) {
-          mapInstanceRef.current.destroy()
-        }
-
-        const map = new AMap.Map(mapRef.current, {
-          zoom: 11,
-          center: [116.397428, 39.90923],
-          viewMode: '2D'
-        })
-
-        mapInstanceRef.current = map
-      } catch (error) {
-        console.error('Error loading map:', error)
-      }
+  const itinerary = useMemo(() => {
+    if (!plan?.itinerary) return null
+    if (typeof plan.itinerary === 'object') return plan.itinerary
+    if (typeof plan.itinerary === 'string') {
+      try { return JSON.parse(plan.itinerary) } catch { return null }
     }
-
-    initMap()
-
-    return () => {
-      if (mapInstanceRef.current) {
-        mapInstanceRef.current.destroy()
-        mapInstanceRef.current = null
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!mapInstanceRef.current || !plan?.itinerary) return
-
-    const updateMapWithPlan = async () => {
-      try {
-        const AMap = window.AMap
-        const map = mapInstanceRef.current
-
-        // Clear existing markers and routes
-        markersRef.current.forEach(marker => marker.setMap(null))
-        markersRef.current = []
-        if (window.driving) {
-          window.driving.clear()
-        }
-
-        const geocoder = new AMap.Geocoder()
-        const locations = []
-        const waypoints = []
-
-        // Get coordinates for each day's locations
-        if (plan.itinerary.days) {
-          for (const day of plan.itinerary.days) {
-            if (day.locations) {
-              for (const location of day.locations) {
-                try {
-                  const result = await new Promise((resolve, reject) => {
-                    geocoder.getLocation(location.name || location.place, (status, data) => {
-                      if (status === 'complete' && data.geocodes.length) {
-                        resolve(data.geocodes[0].location)
-                      } else {
-                        reject(new Error('Geocoding failed'))
-                      }
-                    })
-                  })
-
-                  const position = [result.lng, result.lat];
-                  locations.push({
-                    position: position,
-                    name: location.name || location.place,
-                    description: location.description
-                  })
-
-                  // Add marker
-                  const marker = new AMap.Marker({
-                    position: position,
-                    title: location.name || location.place,
-                    map: map
-                  })
-
-                  // Add info window
-                  const infoWindow = new AMap.InfoWindow({
-                    content: `<div style="padding: 10px;">
-                      <h4 style="margin: 0 0 8px 0;">${location.name || location.place}</h4>
-                      <p style="margin: 0; font-size: 12px; color: #666;">${location.description || ''}</p>
-                    </div>`
-                  })
-
-                  marker.on('click', () => {
-                    infoWindow.open(map, marker.getPosition())
-                  })
-
-                  markersRef.current.push(marker)
-
-                  if (locations.length > 1) {
-                    waypoints.push(position);
-                  }
-
-                } catch (error) {
-                  console.error('Error geocoding location:', location.name, error)
-                }
-              }
-            }
-          }
-        }
-
-        if (locations.length > 1) {
-          const start = locations[0].position;
-          const end = locations[locations.length - 1].position;
-          const path = waypoints.slice(0, -1);
-
-          const driving = new AMap.Driving({
-            map: map,
-            policy: AMap.DrivingPolicy.LEAST_TIME
-          });
-
-          window.driving = driving; // Store driving instance to clear it later
-
-          driving.search(start, end, { waypoints: path }, (status, result) => {
-            if (status === 'complete') {
-              // Fit map to route
-              map.setFitView();
-            } else {
-              console.error('Failed to get driving route:', result);
-            }
-          });
-        } else if (locations.length === 1) {
-          map.setCenter(locations[0].position)
-          map.setZoom(14)
-        }
-
-      } catch (error) {
-        console.error('Error updating map with plan:', error)
-      }
-    }
-
-    updateMapWithPlan()
-
+    return null
   }, [plan])
 
-  return <div ref={mapRef} className="map-view"></div>
+  const locationNames = useMemo(() => {
+    const names = []
+    if (itinerary?.days?.length) {
+      for (const day of itinerary.days) {
+        if (Array.isArray(day.locations)) {
+          for (const loc of day.locations) {
+            const name = loc?.name || loc?.place
+            if (name) names.push(name)
+          }
+        }
+      }
+    }
+    return names
+  }, [itinerary])
+
+  const nameIndexMap = useMemo(() => {
+    const map = new Map()
+    locationNames.forEach((n, i) => { if (!map.has(n)) map.set(n, i + 1) })
+    return map
+  }, [locationNames])
+
+  const [routePoints, setRoutePoints] = useState(null)
+
+  useEffect(() => {
+    const handler = (e) => {
+      const { from, to } = e.detail || {}
+      if (!from || !to) return
+      const s = nameIndexMap.get(from)
+      const t = nameIndexMap.get(to)
+      if (s && t) {
+        setRoutePoints([s, t])
+      } else {
+        console.warn('无法匹配地点到序号:', from, to)
+      }
+    }
+    window.addEventListener('map:routeSegment', handler)
+    return () => window.removeEventListener('map:routeSegment', handler)
+  }, [nameIndexMap])
+
+  if (!plan) {
+    return (
+      <div className="map-view">
+        <div className="map-placeholder">未选择计划，地图不可用</div>
+      </div>
+    )
+  }
+
+  const title = plan?.destination || plan?.title || '中国北京'
+
+  return (
+    <div className="map-view">
+      <AMapItinerary title={title} locations={locationNames} routePoints={routePoints} />
+    </div>
+  )
 }
 
 export default MapView
+

@@ -40,6 +40,8 @@ export async function generateItinerary({ destination, days, budget, travelers, 
         {
           "name": "景点名称",
           "place": "具体地址或区域",
+          "longitude": 经度 (标准数字)，
+          "latitude": 纬度 (标准数字)，
           "description": "景点描述和游玩建议",
           "time": "建议游玩时间（例如：09:00-12:00）",
           "tips": "游玩小贴士"
@@ -85,12 +87,13 @@ export async function generateItinerary({ destination, days, budget, travelers, 
 
 要求：
 1. 每天安排3-5个景点或活动
-2. 景点安排要考虑地理位置，避免过度往返
+2. 景点安排要考虑地理位置，避免过度往返，且必须是真实存在的景点或活动地点
 3. 预算分配要合理，确保总和不超过用户预算
 4. 考虑用户的旅行偏好
 5. 提供实用的小贴士和建议
 6. 所有费用字段必须是数字类型，不要包含货币符号
-7. 地址信息要具体，便于地图定位`
+7. 每个地点必须提供标准坐标：字段名为 longitude 与 latitude，均为数字（WGS84，经度为东经为正、西经为负；纬度为北纬为正、南纬为负）。若无法确定，请返回 null。
+8. 地址信息要具体，便于地图定位`
 
     const userPrompt = `请为我规划一个${days}天的${destination}旅行计划：
 
@@ -158,6 +161,8 @@ export async function generateItinerary({ destination, days, budget, travelers, 
         locations: Array.isArray(day.locations) ? day.locations.map(loc => ({
           name: loc.name || '未命名景点',
           place: loc.place || destination,
+          longitude: (Number.isFinite(loc?.longitude) && loc.longitude >= -180 && loc.longitude <= 180) ? loc.longitude : null,
+          latitude: (Number.isFinite(loc?.latitude) && loc.latitude >= -90 && loc.latitude <= 90) ? loc.latitude : null,
           description: loc.description || '',
           time: loc.time || '全天',
           tips: loc.tips || ''
@@ -225,6 +230,8 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
         {
           name: `${destination}著名景点 ${i + 1}`,
           place: `${destination}市中心`,
+          longitude: null,
+          latitude: null,
           description: `这是${destination}最受欢迎的景点之一，${preferences ? `特别适合喜欢${preferences}的游客` : '适合各类游客'}。建议游玩时间2-3小时。`,
           time: '09:00-12:00',
           tips: '建议提前在线购票，避免排队'
@@ -232,6 +239,8 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
         {
           name: `${destination}特色美食街`,
           place: `${destination}老城区`,
+          longitude: null,
+          latitude: null,
           description: '汇集当地特色小吃和传统美食，是品尝地道风味的最佳地点。',
           time: '12:00-14:00',
           tips: '人均消费约80-120元'
@@ -239,6 +248,8 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
         {
           name: `${destination}文化体验中心`,
           place: `${destination}新区`,
+          longitude: null,
+          latitude: null,
           description: '了解当地历史文化的绝佳场所，设有互动展览和体验活动。',
           time: '15:00-18:00',
           tips: '周一闭馆，请注意开放时间'
@@ -284,14 +295,7 @@ function generateMockItinerary({ destination, days, budget, travelers, preferenc
   }
 }
 
-/**
- * Voice recognition service using Xunfei API (placeholder)
- */
-export async function recognizeVoice(audioBlob) {
-  // Placeholder for Xunfei voice recognition
-  // In production, implement actual API call to Xunfei
-  throw new Error('语音识别功能需要配置科大讯飞 API。请在 .env 文件中配置 VITE_XFYUN_APPID、VITE_XFYUN_API_SECRET、VITE_XFYUN_API_KEY 相关参数。')
-}
+// 移除未使用的占位语音识别方法（recognizeVoice）
 
 /**
  * Parse user voice input to extract travel plan details.
@@ -299,6 +303,16 @@ export async function recognizeVoice(audioBlob) {
  * @returns {Promise<Object>} A structured object with extracted details.
  */
 export async function parseVoiceInput(voiceInput) {
+  // 当前系统时间上下文（含 UTC 偏移），用于日期推断
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const currentDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  const currentTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`
+  const tzOffsetMin = -now.getTimezoneOffset() // 本地相对 UTC 的偏移（正表示东区）
+  const sign = tzOffsetMin >= 0 ? '+' : '-'
+  const abs = Math.abs(tzOffsetMin)
+  const tz = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  const currentContext = `当前系统时间：${currentDate} ${currentTime}（UTC${tz}）`
   // 1) 优先使用讯飞 Spark HTTP（OpenAI 兼容）
   if (XUNFEI_HTTP_API_KEY) {
     const systemPrompt = `你是一个智能助理，负责从用户的自然语言输入中提取旅行计划的关键信息。
@@ -315,11 +329,12 @@ export async function parseVoiceInput(voiceInput) {
 }
 
 注意：
-- 日期处理：如果用户提到月份，默认为当年的该月1号；尽量解析为 YYYY-MM-DD。
+- 日期推断：你将获得“当前系统时间（UTC±HH:mm）”。若用户未明确年份或仅提到相对时间（如“下周末”“本月中旬”“国庆假期”），请基于当前系统时间计算出具体的 YYYY-MM-DD；若无法唯一确定，请返回 null。
+- 日期处理：如果用户仅提到月份，默认为当年的该月1号；统一输出为 YYYY-MM-DD。
 - 数字转换：确保预算和人数是数字类型。
 - 字段缺失：如果信息不明确或未提供，返回 null。`;
 
-    const userPrompt = `请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
+    const userPrompt = `当前时间上下文：${currentContext}\n\n请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
 
     try {
       const response = await fetch(XUNFEI_HTTP_ENDPOINT, {
@@ -370,9 +385,13 @@ export async function parseVoiceInput(voiceInput) {
   "budget": 预算金额 (数字),
   "travelers": 同行人数 (数字),
   "preferences": "旅行偏好"
-}`;
+}
 
-    const userPrompt = `请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
+注意：
+- 你将获得“当前系统时间（UTC±HH:mm）”；若用户未明确年份或仅提到相对时间（如“下周末”“本月中旬”），请根据当前系统时间推断具体 YYYY-MM-DD；若无法确定返回 null。
+- 统一日期输出格式为 YYYY-MM-DD；数字字段确保为数字类型。`;
+
+    const userPrompt = `当前时间上下文：${currentContext}\n\n请从以下文本中提取旅行计划信息：\n\n"${voiceInput}"`;
 
     try {
       const response = await fetch(QIANWEN_ENDPOINT, {
