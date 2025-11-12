@@ -26,8 +26,12 @@ function toNumberOrNull(val) {
 }
 
 async function safeGeocode(address) {
+  const q = (address || '').trim()
+  if (!q || q.length < 2) {
+    return { longitude: null, latitude: null }
+  }
   try {
-    const { longitude, latitude } = await geocodeAddress(address)
+    const { longitude, latitude } = await geocodeAddress(q)
     return {
       longitude: toNumberOrNull(longitude),
       latitude: toNumberOrNull(latitude)
@@ -37,19 +41,128 @@ async function safeGeocode(address) {
   }
 }
 
+// Attempt to robustly extract a JSON object from a free-form LLM content string
+function extractJsonFromText(text) {
+  if (text == null) throw new Error('LLM未返回内容')
+  if (typeof text !== 'string') {
+    // Some providers may already return an object
+    try { return JSON.parse(JSON.stringify(text)) } catch { throw new Error('LLM返回内容非字符串且无法序列化') }
+  }
+  let s = text.trim()
+  // Remove common code fences
+  s = s.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
+  // Extract between the first '{' and the last '}' if extra text is present
+  const first = s.indexOf('{')
+  const last = s.lastIndexOf('}')
+  if (first !== -1 && last !== -1 && last > first) {
+    s = s.slice(first, last + 1)
+  }
+  // Remove trailing commas before closing braces/brackets to fix minor formatting
+  s = s.replace(/,\s*([}\]])/g, '$1')
+  // Escape raw newlines inside double-quoted strings to keep JSON valid
+  {
+    let out = ''
+    let inString = false
+    let backslash = false
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === '"' && !backslash) {
+        inString = !inString
+        out += ch
+        backslash = false
+        continue
+      }
+      if (ch === '\\') {
+        out += ch
+        backslash = !backslash
+        continue
+      }
+      if (inString && (ch === '\n' || ch === '\r')) {
+        out += '\\n'
+        backslash = false
+        continue
+      }
+      if (inString && (ch === '\u2028' || ch === '\u2029')) {
+        out += '\\n'
+        backslash = false
+        continue
+      }
+      out += ch
+      backslash = false
+    }
+    s = out
+  }
+  // Remove problematic control characters
+  s = s.replace(/[\u0000-\u001F]+/g, '')
+  // Remove Unicode line/paragraph separators globally
+  s = s.replace(/[\u2028\u2029]/g, '')
+  try {
+    return JSON.parse(s)
+  } catch (err) {
+    // 将清洗后的全文打印到控制台，便于命令行/控制台定位问题
+    try {
+      console.error('\n===== LLM JSON RAW (cleaned) BEGIN =====\n')
+      console.error(s)
+      console.error('\n===== LLM JSON RAW (cleaned) END =====\n')
+    } catch (_) {}
+    const snippet = s.slice(0, 500)
+    throw new Error(`LLM返回JSON解析失败：${err.message}。片段：${snippet}`)
+  }
+}
+
+// Robust resolver to ensure destination coordinates are non-null by trying multiple candidates
+async function resolveDestinationCoords(destination) {
+  const raw = (destination || '').trim()
+  const candidateSet = new Set()
+
+  // Known mappings for ambiguous region names -> formal names / capital cities
+  const formalMap = {
+    '西藏': ['西藏自治区', '拉萨市'],
+    '内蒙古': ['内蒙古自治区', '呼和浩特市'],
+    '广西': ['广西壮族自治区', '南宁市'],
+    '宁夏': ['宁夏回族自治区', '银川市'],
+    '新疆': ['新疆维吾尔自治区', '乌鲁木齐市'],
+    '香港': ['香港特别行政区'],
+    '澳门': ['澳门特别行政区']
+  }
+
+  if (raw) {
+    candidateSet.add(raw)
+    candidateSet.add(`${raw}市`)
+    candidateSet.add(`${raw}省`)
+    candidateSet.add(`${raw}自治区`)
+    candidateSet.add(`${raw}特别行政区`)
+    if (formalMap[raw]) {
+      for (const f of formalMap[raw]) candidateSet.add(f)
+    }
+  }
+
+  for (const addr of candidateSet) {
+    const res = await safeGeocode(addr)
+    if (isValidLongitude(res.longitude) && isValidLatitude(res.latitude)) {
+      return res
+    }
+  }
+
+  // As last resort, return nulls (caller may handle further)
+  return { longitude: null, latitude: null }
+}
+
 async function enrichItineraryWithCoords({ itinerary, destination, days, budget, travelers }) {
   const destLatRaw = itinerary.destination_latitude
   const destLngRaw = itinerary.destination_longitude
   let destLat = toNumberOrNull(destLatRaw)
   let destLng = toNumberOrNull(destLngRaw)
+  const normDest = (destination || '').trim()
 
   if (!isValidLatitude(destLat) || !isValidLongitude(destLng)) {
-    const dest = await safeGeocode(destination)
+    const dest = await resolveDestinationCoords(destination)
     destLat = dest.latitude
     destLng = dest.longitude
   }
 
   const normalizedItinerary = {
+    // 目的地坐标使用 AMap 解析结果；若解析失败则保持为 null，由上层渲染或后续修复逻辑处理
     destination_latitude: isValidLatitude(destLat) ? destLat : null,
     destination_longitude: isValidLongitude(destLng) ? destLng : null,
     days: (Array.isArray(itinerary.days) ? itinerary.days : []).map((day, index) => ({
@@ -101,20 +214,20 @@ async function enrichItineraryWithCoords({ itinerary, destination, days, budget,
   for (const day of normalizedItinerary.days) {
     const newLocs = []
     for (const loc of day.locations) {
-      const name = loc?.name || '未命名景点'
-      const place = loc?.place || destination
+      const name = (loc?.name || '未命名景点').trim()
+      const place = (loc?.place || normDest).trim()
 
       let lng = toNumberOrNull(loc?.longitude)
       let lat = toNumberOrNull(loc?.latitude)
 
       const hasValid = isValidLongitude(lng) && isValidLatitude(lat)
       if (!hasValid) {
-        const addrCandidates = [
+        const addrCandidates = Array.from(new Set([
           place,
-          `${destination} ${place}`,
-          `${destination} ${name}`,
-          destination
-        ]
+          `${normDest} ${place}`.trim(),
+          `${normDest} ${name}`.trim(),
+          normDest
+        ].filter(Boolean)))
 
         let found = { longitude: null, latitude: null }
         for (const addr of addrCandidates) {
@@ -164,18 +277,15 @@ async function enrichItineraryWithCoords({ itinerary, destination, days, budget,
  */
 export async function generateItinerary({ destination, days, budget, travelers, preferences }) {
   if (!QIANWEN_API_KEY || QIANWEN_API_KEY === 'your_qianwen_api_key') {
-    console.warn('Qianwen API key not configured, using mock data')
-    return await generateMockItinerary({ destination, days, budget, travelers, preferences })
+    throw new Error('行程生成服务未配置：请在 .env 设置 VITE_QIANWEN_API_KEY')
   }
 
   try {
     const systemPrompt = `你是一位专业的旅行规划专家。你的任务是根据用户需求生成详细的旅行行程计划。
 
-你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明：
+必须严格返回一个 JSON 对象（不允许任何额外文字），字段规范如下：
 
 {
-  "destination_latitude": 目的地纬度(标准数字),
-  "destination_longitude": 目的地经度(标准数字),
   "days": [
     {
       "day": 1,
@@ -183,9 +293,7 @@ export async function generateItinerary({ destination, days, budget, travelers, 
       "locations": [
         {
           "name": "景点名称",
-          "place": "具体地址或区域",
-          "longitude": 经度 (标准数字)，
-          "latitude": 纬度 (标准数字)，
+          "place": "具体地址或区域（便于后续地理编码）",
           "description": "景点描述和游玩建议",
           "time": "建议游玩时间（例如：09:00-12:00）",
           "tips": "游玩小贴士"
@@ -210,11 +318,11 @@ export async function generateItinerary({ destination, days, budget, travelers, 
     }
   ],
   "budgetBreakdown": {
-    "accommodation": 住宿总费用（数字）,
-    "food": 餐饮总费用（数字）,
-    "transportation": 交通总费用（数字）,
-    "attractions": 景点门票总费用（数字）,
-    "shopping": 购物预算（数字）,
+    "accommodation": 住宿总费用（数字）, 
+    "food": 餐饮总费用（数字）, 
+    "transportation": 交通总费用（数字）, 
+    "attractions": 景点门票总费用（数字）, 
+    "shopping": 购物预算（数字）, 
     "reserve": 预留费用（数字）
   },
   "tips": [
@@ -229,15 +337,12 @@ export async function generateItinerary({ destination, days, budget, travelers, 
   }
 }
 
-要求：
-1. 每天安排3-5个景点或活动
-2. 景点安排要考虑地理位置，避免过度往返，且必须是真实存在的景点或活动地点
-3. 预算分配要合理，确保总和不超过用户预算
-4. 考虑用户的旅行偏好
-5. 提供实用的小贴士和建议
-6. 所有费用字段必须是数字类型，不要包含货币符号
-7. 每个地点必须提供标准坐标：字段名为 longitude 与 latitude，均为数字（WGS84，经度为东经为正、西经为负；纬度为北纬为正、南纬为负）。若无法确定，请返回 null。
-8. 地址信息要具体，便于地图定位`
+严格要求：
+1. 每天安排 2-4 个景点或活动；必须是真实存在的地点，避免含糊或虚构。
+2. 所有费用字段必须是数字类型，不包含货币符号。
+3. 不要生成任何经纬度相关字段（如 longitude、latitude、destination_longitude、destination_latitude）。
+4. 地址信息要具体，便于后续地理编码（例如包含城市区名或著名地标）。
+5. 返回值必须是严格的 JSON 对象（与响应格式一致），不允许多余文本。`
 
     const userPrompt = `请为我规划一个${days}天的${destination}旅行计划：
 
@@ -271,7 +376,7 @@ export async function generateItinerary({ destination, days, budget, travelers, 
         response_format: {
           type: 'json_object'
         },
-        max_tokens: 4000
+        max_tokens: 5000
       })
     })
 
@@ -281,16 +386,31 @@ export async function generateItinerary({ destination, days, budget, travelers, 
     }
 
     const data = await response.json()
-    
-    // Extract the JSON string from response
-    const contentString = data.choices?.[0]?.message?.content
-    
-    if (!contentString) {
-      throw new Error('No content returned from API')
-    }
-
-    // Parse the JSON string
-    const itinerary = JSON.parse(contentString)
+    const content = data.choices?.[0]?.message?.content
+    const itineraryRaw = extractJsonFromText(content)
+    // 为确保坐标一律通过 AMap 统一解析，剥离 LLM 可能返回的坐标字段
+    const itinerary = (() => {
+      try {
+        const obj = JSON.parse(JSON.stringify(itineraryRaw))
+        delete obj.destination_longitude
+        delete obj.destination_latitude
+        if (Array.isArray(obj.days)) {
+          for (const day of obj.days) {
+            if (Array.isArray(day?.locations)) {
+              for (const loc of day.locations) {
+                if (loc && typeof loc === 'object') {
+                  delete loc.longitude
+                  delete loc.latitude
+                }
+              }
+            }
+          }
+        }
+        return obj
+      } catch (_) {
+        return itineraryRaw
+      }
+    })()
 
     // Validate the structure
     if (!itinerary.days || !Array.isArray(itinerary.days)) {
@@ -304,95 +424,11 @@ export async function generateItinerary({ destination, days, budget, travelers, 
 
   } catch (error) {
     console.error('Error calling Qianwen API:', error)
-    
-    // If API call fails, fall back to mock data
-    console.warn('Falling back to mock itinerary due to error')
-    return await generateMockItinerary({ destination, days, budget, travelers, preferences })
+    throw error
   }
 }
 
-/**
- * Generate mock itinerary for testing/fallback
- */
-async function generateMockItinerary({ destination, days, budget, travelers, preferences }) {
-  console.log('Generating mock itinerary for:', { destination, days, budget, travelers, preferences })
-  
-  const mock = {
-    days: Array.from({ length: days }, (_, i) => ({
-      day: i + 1,
-      theme: i === 0 ? '抵达与适应' : i === days - 1 ? '返程准备' : `探索${destination}`,
-      locations: [
-        {
-          name: `${destination}著名景点 ${i + 1}`,
-          place: `${destination}市中心`,
-          longitude: null,
-          latitude: null,
-          description: `这是${destination}最受欢迎的景点之一，${preferences ? `特别适合喜欢${preferences}的游客` : '适合各类游客'}。建议游玩时间2-3小时。`,
-          time: '09:00-12:00',
-          tips: '建议提前在线购票，避免排队'
-        },
-        {
-          name: `${destination}特色美食街`,
-          place: `${destination}老城区`,
-          longitude: null,
-          latitude: null,
-          description: '汇集当地特色小吃和传统美食，是品尝地道风味的最佳地点。',
-          time: '12:00-14:00',
-          tips: '人均消费约80-120元'
-        },
-        {
-          name: `${destination}文化体验中心`,
-          place: `${destination}新区`,
-          longitude: null,
-          latitude: null,
-          description: '了解当地历史文化的绝佳场所，设有互动展览和体验活动。',
-          time: '15:00-18:00',
-          tips: '周一闭馆，请注意开放时间'
-        }
-      ],
-      accommodation: {
-        name: `${destination}精选酒店`,
-        area: '市中心/交通便利区域',
-        priceRange: '中高档',
-        estimatedCost: Math.round(budget / days / travelers * 0.35)
-      },
-      meals: {
-        breakfast: '酒店自助早餐',
-        lunch: `${destination}特色餐厅`,
-        dinner: '当地推荐美食'
-      },
-      transportation: {
-        type: '地铁/公交/打车',
-        estimatedCost: Math.round(budget / days * 0.1)
-      },
-      estimatedCost: Math.round(budget / days)
-    })),
-    budgetBreakdown: {
-      accommodation: Math.round(budget * 0.35),
-      food: Math.round(budget * 0.25),
-      transportation: Math.round(budget * 0.20),
-      attractions: Math.round(budget * 0.10),
-      shopping: Math.round(budget * 0.05),
-      reserve: Math.round(budget * 0.05)
-    },
-    tips: [
-      `${destination}最佳旅游季节建议`,
-      '建议购买旅游保险',
-      '提前下载当地地图和翻译软件',
-      '注意保管好贵重物品',
-      '尊重当地文化习俗'
-    ],
-    transportation: {
-      toDestination: '建议乘坐飞机或高铁前往',
-      local: '市内以地铁和公交为主，部分景点可打车',
-      estimatedCost: Math.round(budget * 0.2)
-    }
-  }
-
-  // 使用与正式流程一致的坐标填充逻辑
-  const enriched = await enrichItineraryWithCoords({ itinerary: mock, destination, days, budget, travelers })
-  return enriched
-}
+// 删除未使用的 generateMockItinerary，避免混淆与冗余
 
 
 /**

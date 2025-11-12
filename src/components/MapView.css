@@ -5,6 +5,18 @@
   position: relative;
 }
 
+.mapview-iframe-wrapper {
+  width: 100%;
+  height: 100%;
+}
+
+.mapview-iframe {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+}
+
 #container {
   width: 100%;
   height: 100%;
@@ -31,3 +43,5 @@
   border-bottom-right-radius: 4px;
   overflow: hidden;
 }
+
+/* 已移除 Baidu 相关样式，仅保留 AMap 容器样式 */

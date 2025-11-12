@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTravelStore } from '../store/travelStore';
-import { Calendar, DollarSign, Users, MapPin, Plus, Trash2, Clock, Hotel, Utensils, Navigation, Lightbulb, Car } from 'lucide-react';
+import { geocodeAddress } from '../services/amapService';
+import { Calendar, DollarSign, Users, MapPin, Plus, Clock, Hotel, Utensils, Navigation, Lightbulb, Car } from 'lucide-react';
 import './PlanDetails.css';
 
 function PlanDetails({ plan }) {
@@ -15,20 +16,94 @@ function PlanDetails({ plan }) {
   });
   const [activeTab, setActiveTab] = useState('itinerary');
 
-  // Emit a driving route event with coordinates, robustly handling null/same points
-  const triggerSegmentRoute = (startLoc, endLoc) => {
-    if (!startLoc || !endLoc) return;
-    const toNum = (v) => {
-      const n = typeof v === 'string' ? parseFloat(v) : v;
-      return Number.isFinite(n) ? n : null;
-    };
-    const slng = toNum(startLoc.longitude), slat = toNum(startLoc.latitude);
-    const tlng = toNum(endLoc.longitude), tlat = toNum(endLoc.latitude);
-    const valid = (lng, lat) => typeof lng === 'number' && typeof lat === 'number' && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
-    if (!valid(slng, slat) || !valid(tlng, tlat)) return; // null/invalid -> keep original map
-    if (slng === tlng && slat === tlat) return; // same start/end -> keep original map
+  // 辅助：解析数字并校验经纬度
+  const toNum = (v) => {
+    const n = typeof v === 'string' ? parseFloat(v) : v;
+    return Number.isFinite(n) ? n : null;
+  };
+  const validCoord = (lng, lat) => typeof lng === 'number' && typeof lat === 'number' && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
+
+  // 根据地点对象与目的地，查询经纬度（若为空），并返回 {longitude, latitude}
+  const ensureCoordsForLoc = async (loc, destination) => {
+    let lng = toNum(loc?.longitude);
+    let lat = toNum(loc?.latitude);
+    if (validCoord(lng, lat)) return { longitude: lng, latitude: lat };
+    const name = (loc?.name || '').trim();
+    const place = (loc?.place || destination || '').trim();
+    const candidates = Array.from(new Set([
+      place,
+      `${destination || ''} ${place}`.trim(),
+      `${destination || ''} ${name}`.trim(),
+      name,
+    ].filter(Boolean)));
+    for (const addr of candidates) {
+      try {
+        const res = await geocodeAddress(addr);
+        const L = toNum(res?.longitude);
+        const B = toNum(res?.latitude);
+        if (validCoord(L, B)) {
+          return { longitude: L, latitude: B };
+        }
+      } catch (_) {}
+    }
+    return { longitude: null, latitude: null };
+  };
+
+  // 反写数据库：更新 itinerary.days[dayIdx].locations[locIdx] 的坐标
+  const { updatePlan } = useTravelStore();
+  const writeBackCoords = async (planId, itineraryData, dayIdx, locIdx, coords) => {
     try {
-      window.dispatchEvent(new CustomEvent('map:drivingRoute', { detail: { start: { lng: slng, lat: slat }, end: { lng: tlng, lat: tlat } } }));
+      const next = JSON.parse(JSON.stringify(itineraryData || {}));
+      if (!next?.days?.[dayIdx]?.locations?.[locIdx]) return null;
+      next.days[dayIdx].locations[locIdx].longitude = coords.longitude;
+      next.days[dayIdx].locations[locIdx].latitude = coords.latitude;
+      const updated = await updatePlan(planId, { itinerary: next });
+      return updated?.itinerary || next;
+    } catch (e) {
+      console.warn('反写坐标到数据库失败：', e);
+      return null;
+    }
+  };
+
+  // 按严格逻辑：若起终点坐标为 null，先查询、反写，再派发导航事件
+  const triggerSegmentRoute = async (dayIdx, startIdx) => {
+    if (!itineraryData?.days?.[dayIdx]?.locations?.[startIdx]) {
+      console.warn('[导航至下一地点] 找不到起点');
+      return;
+    }
+    const startLoc = itineraryData.days[dayIdx].locations[startIdx];
+    const endLoc = itineraryData.days[dayIdx].locations[startIdx + 1];
+    if (!endLoc) {
+      console.warn('[导航至下一地点] 找不到终点');
+      return;
+    }
+    try { console.log('[导航至下一地点] 原始对象:', { startLoc, endLoc }) } catch {}
+
+    // 坐标校验与补齐
+    const dest = (plan?.destination || '').trim();
+    let startCoords = { longitude: toNum(startLoc.longitude), latitude: toNum(startLoc.latitude) };
+    if (!validCoord(startCoords.longitude, startCoords.latitude)) {
+      startCoords = await ensureCoordsForLoc(startLoc, dest);
+      const wb = await writeBackCoords(plan.id, itineraryData, dayIdx, startIdx, startCoords);
+      if (wb) itineraryData.days[dayIdx].locations[startIdx] = wb.days[dayIdx].locations[startIdx];
+    }
+
+    let endCoords = { longitude: toNum(endLoc.longitude), latitude: toNum(endLoc.latitude) };
+    if (!validCoord(endCoords.longitude, endCoords.latitude)) {
+      endCoords = await ensureCoordsForLoc(endLoc, dest);
+      const wb = await writeBackCoords(plan.id, itineraryData, dayIdx, startIdx + 1, endCoords);
+      if (wb) itineraryData.days[dayIdx].locations[startIdx + 1] = wb.days[dayIdx].locations[startIdx + 1];
+    }
+
+    const slng = startCoords.longitude; const slat = startCoords.latitude;
+    const elng = endCoords.longitude; const elat = endCoords.latitude;
+    if (!validCoord(slng, slat) || !validCoord(elng, elat)) {
+      console.warn('[导航至下一地点] 坐标仍无效，起点/终点:', { slng, slat, elng, elat });
+      return;
+    }
+    try { console.log('[导航至下一地点] 起点:', { lng: slng, lat: slat }, '终点:', { lng: elng, lat: elat }) } catch {}
+    try {
+      window.dispatchEvent(new CustomEvent('map:drivingRoute', { detail: { start: { lng: slng, lat: slat }, end: { lng: elng, lat: elat } } }));
     } catch (err) {
       console.error('Failed to dispatch driving route event:', err);
     }
@@ -85,7 +160,7 @@ function PlanDetails({ plan }) {
                   <button
                     className="route-segment-btn"
                     title="导航至下一地点"
-                    onClick={() => triggerSegmentRoute(loc, day.locations[index + 1])}
+                    onClick={() => triggerSegmentRoute(itineraryData.days.findIndex(d => d.day === day.day), index)}
                   >
                     <Navigation size={14} /> 导航至下一地点
                   </button>

@@ -38,29 +38,26 @@ npm install
 
 ### 3. 配置环境变量
 
-复制 `.env.example` 为 `.env` 并填入你的 API 密钥：
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 文件：
+创建并编辑 `.env` 文件（所有参数默认可留空；以 `VITE_` 开头的变量在构建时注入）：
 
 ```env
+# 地图相关（当前组件使用高德 AMap JSAPI）
+VITE_AMAP_KEY=
+VITE_AMAP_SECURE_KEY=
+VITE_AMAP_SERVICE_HOST=
+VITE_AMAP_SERVER_KEY=
+VITE_AMAP_USE_REST=
+
 # Supabase 配置
-VITE_SUPABASE_URL=your_supabase_url
-VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
 
-# 高德地图 API Key
-VITE_AMAP_KEY=your_amap_api_key
-
-# 科大讯飞语音 API（可选）
-VITE_XUNFEI_APP_ID=your_xunfei_app_id
-VITE_XUNFEI_API_SECRET=your_xunfei_api_secret
-VITE_XUNFEI_API_KEY=your_xunfei_api_key
-
-# 通义千问 API
-VITE_QIANWEN_API_KEY=your_qianwen_api_key
+# AI / 语音服务
+VITE_QIANWEN_API_KEY=
+VITE_XUNFEI_APP_ID=
+VITE_XUNFEI_SECRET_KEY=
+VITE_XUNFEI_HTTP_API_KEY=
+VITE_XUNFEI_MODEL=
 ```
 
 ### 4. 配置 Supabase 数据库
@@ -219,8 +216,71 @@ MIT License
 
 ## 作者
 
-AI Travel Team
+[mas233](https://mas233.github.io)
 
 ---
 
 **注意**: 这是一个演示项目，部分 AI 功能使用 mock 数据。在生产环境中需要配置真实的 API 密钥。
+## 环境变量说明（VITE_*）
+
+- `VITE_AMAP_KEY`: 高德 JSAPI Key（浏览器端 JSAPI 加载）。
+- `VITE_AMAP_SECURE_KEY`: 高德 JSAPI 安全密钥（明文 securityJsCode 方案）。
+- `VITE_AMAP_SERVICE_HOST`: 高德 JSAPI 安全代理根路径（推荐代理方案）。
+- `VITE_AMAP_SERVER_KEY`: 高德 Web 服务 REST Key（服务端用途）。
+- `VITE_AMAP_USE_REST`: 是否优先使用高德 REST 服务（布尔/字符串）。
+- `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`: Supabase 项目 URL 与 anon key。
+- `VITE_QIANWEN_API_KEY`: 通义千问 API Key。
+- `VITE_XUNFEI_APP_ID`, `VITE_XUNFEI_SECRET_KEY`, `VITE_XUNFEI_HTTP_API_KEY`, `VITE_XUNFEI_MODEL`: 讯飞语音/HTTP 参数。
+
+提示：Vite 以构建时注入 `VITE_*` 变量为准，因此容器或本地修改这些值后需要重新构建。
+
+## 使用 Docker 运行
+
+本项目提供多阶段 Dockerfile，将前端构建产物打包为单个可运行镜像，默认通过 Nginx 提供服务。
+
+### 构建镜像（支持在构建时设置 .env 参数）
+
+```bash
+docker build -t ai-travel-planner \
+  --build-arg VITE_AMAP_KEY= \
+  --build-arg VITE_AMAP_SECURE_KEY= \
+  --build-arg VITE_AMAP_SERVICE_HOST= \
+  --build-arg VITE_AMAP_SERVER_KEY= \
+  --build-arg VITE_AMAP_USE_REST= \
+  --build-arg VITE_SUPABASE_URL= \
+  --build-arg VITE_SUPABASE_ANON_KEY= \
+  --build-arg VITE_QIANWEN_API_KEY= \
+  --build-arg VITE_XUNFEI_APP_ID= \
+  --build-arg VITE_XUNFEI_SECRET_KEY= \
+  --build-arg VITE_XUNFEI_HTTP_API_KEY= \
+  --build-arg VITE_XUNFEI_MODEL= \
+  .
+```
+
+说明：以上 `--build-arg` 均为可选，未设置时默认注入为空字符串。需要在构建时设置的环境参数都以 `VITE_` 开头。
+
+### 运行镜像
+
+```bash
+docker run --rm -p 8080:80 ai-travel-planner
+```
+
+启动后访问 `http://localhost:8080`。
+
+## 本地运行
+
+1. 安装 Node.js 18+
+2. 创建并填写 `.env`（所有变量可留空）；示例见上文
+3. 安装依赖并启动开发服务器：
+
+```bash
+npm ci
+npm run dev
+```
+
+访问 `http://localhost:3000`。
+
+## 重要说明
+
+- 前端读取的环境变量以 `VITE_*` 前缀为准，且在构建时注入。如果需要在 Docker 中变更这些值，需要重新构建镜像。
+- 地图功能当前使用高德 AMap JSAPI。请配置 `VITE_AMAP_*` 变量并在开放平台设置域名白名单。

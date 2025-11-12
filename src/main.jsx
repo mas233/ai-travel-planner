@@ -2,8 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import './index.css'
-// Side-effect import to expose geocodeAddress on window for dev console
-import './services/amapService.js'
+// 移除开发时的副作用导入，避免不必要的全局暴露
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

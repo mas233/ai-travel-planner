@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, CircularProgress } from '@mui/material';
+import { Modal, Button, CircularProgress, Alert } from '@mui/material';
 import { Mic, MicOff, SmartToy, Close } from '@mui/icons-material';
 import voiceService from '../services/voiceService';
 import { parseVoiceInput, generateItinerary } from '../services/aiService';
@@ -9,6 +9,7 @@ import './CreatePlanModal.css';
 function CreatePlanModal({ onClose, userId }) {
   const { createPlan } = useTravelStore();
   const [loading, setLoading] = useState(false);
+  const [errorInfo, setErrorInfo] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [transcribedText, setTranscribedText] = useState('');
   const [isParsing, setIsParsing] = useState(false);
@@ -93,6 +94,7 @@ function CreatePlanModal({ onClose, userId }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setErrorInfo(null);
 
     try {
       const days = Math.ceil(
@@ -119,11 +121,15 @@ function CreatePlanModal({ onClose, userId }) {
         itinerary
       });
 
+      // 可替换为更温和的成功提示（暂保留 alert，按需替换）
       alert('旅行计划创建成功!');
       onClose();
     } catch (error) {
       console.error('Error creating plan:', error);
-      alert('创建计划失败：' + error.message);
+      setErrorInfo({
+        message: error?.message || '服务错误，请稍后重试',
+        suggestion: '请检查 API Key 配置或稍后再试。'
+      });
     } finally {
       setLoading(false);
     }
@@ -140,6 +146,15 @@ function CreatePlanModal({ onClose, userId }) {
         </div>
 
         <form onSubmit={handleSubmit} className="plan-form">
+          {errorInfo && (
+            <Alert severity="error" className="service-error">
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>行程生成服务出错</div>
+              <div style={{ marginBottom: 4 }}>{errorInfo.message}</div>
+              {errorInfo.suggestion && (
+                <div style={{ fontSize: 12, opacity: 0.8 }}>{errorInfo.suggestion}</div>
+              )}
+            </Alert>
+          )}
           <div className="form-group-modal">
             <label htmlFor="destination">目的地</label>
             <input

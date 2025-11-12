@@ -65,25 +65,6 @@ export const useTravelStore = create((set, get) => ({
     }
   },
 
-  deletePlan: async (id) => {
-    try {
-      const { error } = await supabase
-        .schema('travel_planner')
-        .from('travel_plans')
-        .delete()
-        .eq('id', id)
-      
-      if (error) throw error
-      set(state => ({
-        plans: state.plans.filter(p => p.id !== id),
-        currentPlan: state.currentPlan?.id === id ? null : state.currentPlan
-      }))
-    } catch (error) {
-      console.error('Error deleting plan:', error)
-      throw error
-    }
-  },
-
   setCurrentPlan: (plan) => {
     set({ currentPlan: plan })
   },
