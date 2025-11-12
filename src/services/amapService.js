@@ -1,8 +1,9 @@
 // AMap Geocoding service: supports REST (server/serverless key) and JSAPI (browser key) fallback
-const AMAP_SERVER_KEY = import.meta.env.VITE_AMAP_SERVER_KEY;
-const AMAP_WEB_KEY = import.meta.env.VITE_AMAP_KEY;
+import { getEnv } from '../utils/env'
+const AMAP_SERVER_KEY = getEnv('VITE_AMAP_SERVER_KEY');
+const AMAP_WEB_KEY = getEnv('VITE_AMAP_KEY');
 const REST_KEY = AMAP_SERVER_KEY || AMAP_WEB_KEY; // 兼容只配置 VITE_AMAP_KEY 的场景
-const AMAP_USE_REST = String(import.meta.env.VITE_AMAP_USE_REST || '').toLowerCase() === 'true';
+const AMAP_USE_REST = String(getEnv('VITE_AMAP_USE_REST') || '').toLowerCase() === 'true';
 
 function waitForAMap(timeoutMs = 8000) {
   if (typeof window !== 'undefined' && window.AMap) return Promise.resolve();
@@ -27,7 +28,15 @@ function waitForAMap(timeoutMs = 8000) {
 async function geocodeWithRest(address) {
   const base = 'https://restapi.amap.com/v3/geocode/geo';
   const key = REST_KEY;
-  if (!key) throw new Error('缺少 REST Key (VITE_AMAP_SERVER_KEY 或 VITE_AMAP_KEY)');
+  if (!key) {
+    // 仅在 .env 未包含 JSAPI Key 时提示缺失，不提示不存在的变量
+    try {
+      if (!AMAP_WEB_KEY) {
+        window.dispatchEvent(new CustomEvent('env:config-required', { detail: { missing: ['VITE_AMAP_KEY'] } }))
+      }
+    } catch {}
+    throw new Error('缺少 AMap Key');
+  }
   const qs = new URLSearchParams({ address, key, output: 'json' });
   const url = `${base}?${qs.toString()}`;
   const resp = await fetch(url);

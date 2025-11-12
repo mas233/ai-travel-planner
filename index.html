@@ -7,9 +7,12 @@
     <title>AI 旅行规划师</title>
     <!-- 官方文档：JSAPI 安全密钥设置（高德），并加载高德 JSAPI -->
     <script type="module">
-      const serviceHost = import.meta.env.VITE_AMAP_SERVICE_HOST || '';
-      const secureKey = import.meta.env.VITE_AMAP_SECURE_KEY || '';
-      const amapKey = import.meta.env.VITE_AMAP_KEY || '';
+      const ls = (k) => {
+        try { return window.localStorage.getItem(`env.${k}`) || '' } catch (_) { return '' }
+      };
+      const serviceHost = ls('VITE_AMAP_SERVICE_HOST') || import.meta.env.VITE_AMAP_SERVICE_HOST || '';
+      const secureKey = ls('VITE_AMAP_SECURE_KEY') || import.meta.env.VITE_AMAP_SECURE_KEY || '';
+      const amapKey = ls('VITE_AMAP_KEY') || import.meta.env.VITE_AMAP_KEY || '';
 
       // 代理模式优先，其次为明文 securityJsCode（开发期便捷）
       if (serviceHost) {
@@ -20,6 +23,7 @@
 
       if (!amapKey) {
         console.error('缺少 JSAPI Key：请在 .env 中设置 VITE_AMAP_KEY');
+        try { window.dispatchEvent(new CustomEvent('env:config-required', { detail: { missing: ['VITE_AMAP_KEY'] } })) } catch {}
       }
 
       const src = `https://webapi.amap.com/maps?v=2.0&key=${amapKey}&plugin=AMap.Geocoder,AMap.Driving`;

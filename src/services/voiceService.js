@@ -6,14 +6,15 @@
  */
 
 import CryptoJS from 'crypto-js';
+import { getEnv } from '../utils/env';
 
 // Xunfei Long Form ASR endpoints & credentials
 // Use local proxy in dev to avoid CORS
 const XF_UPLOAD_URL    = import.meta.env.DEV ? '/xf/upload'    : 'https://raasr.xfyun.cn/v2/api/upload';
 const XF_GETRESULT_URL = import.meta.env.DEV ? '/xf/getResult' : 'https://raasr.xfyun.cn/v2/api/getResult';
-const XF_SECRET_KEY    = import.meta.env.VITE_XUNFEI_SECRET_KEY;
+const XF_SECRET_KEY    = getEnv('VITE_XUNFEI_SECRET_KEY');
 // User requires appid env name `CITE_XUNFEI_APP_ID`; also accept `VITE_XUNFEI_APP_ID` as fallback
-const XF_APP_ID        = import.meta.env.CITE_XUNFEI_APP_ID || import.meta.env.VITE_XUNFEI_APP_ID;
+const XF_APP_ID        = import.meta.env.CITE_XUNFEI_APP_ID || getEnv('VITE_XUNFEI_APP_ID');
 
 // Audio conversion helpers
 const TARGET_SAMPLE_RATE = 16000;
@@ -152,7 +153,8 @@ class VoiceService {
     if (onEnd)    this.onEnd    = onEnd;
 
     if (!this.isConfigured()) {
-      if (this.onError) this.onError(new Error('语音识别未配置：缺少 CITE_XUNFEI_APP_ID 或 VITE_XUNFEI_SECRET_KEY'));
+      if (this.onError) this.onError(new Error('语音识别未配置：缺少 VITE_XUNFEI_APP_ID 或 VITE_XUNFEI_SECRET_KEY'));
+      try { window.dispatchEvent(new CustomEvent('env:config-required', { detail: { missing: ['VITE_XUNFEI_APP_ID', 'VITE_XUNFEI_SECRET_KEY'] } })) } catch {}
       return;
     }
 

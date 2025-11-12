@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { useTravelStore } from '../store/travelStore';
-import { LogOut, ChevronLeft, Menu } from 'lucide-react';
+import { LogOut, ChevronLeft, Menu, Settings } from 'lucide-react';
 import PlanSelector from '../components/PlanSelector';
 import PlanDetails from '../components/PlanDetails';
 import CreatePlanModal from '../components/CreatePlanModal';
 import MapView from '../components/MapView';
 import './MainPage.css';
 
-function MainPage() {
+function MainPage({ onOpenEnvModal }) {
   const { user, signOut } = useAuthStore();
   const { plans, currentPlan, fetchPlans, setCurrentPlan } = useTravelStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -39,9 +39,14 @@ function MainPage() {
             <div className="user-avatar">{user?.email?.[0]?.toUpperCase() || 'U'}</div>
             <span className="user-email">{user?.email}</span>
           </div>
-          <button onClick={handleLogout} className="logout-button" title="退出登录">
-            <LogOut size={20} />
-          </button>
+          <div className="header-actions">
+            <button onClick={onOpenEnvModal} className="logout-button" title="环境变量配置">
+              <Settings size={20} />
+            </button>
+            <button onClick={handleLogout} className="logout-button" title="退出登录">
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
         <div className="sidebar-content">
           <div className="plan-selection-section">

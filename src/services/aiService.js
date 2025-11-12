@@ -1,15 +1,16 @@
 // AI Service for generating travel itineraries using Tongyi Qianwen API
 import { geocodeAddress } from './amapService'
+import { getEnv } from '../utils/env'
 
-const QIANWEN_API_KEY = import.meta.env.VITE_QIANWEN_API_KEY
+function getQIANWEN_API_KEY() { return getEnv('VITE_QIANWEN_API_KEY') }
 const QIANWEN_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 
 // 讯飞 Spark 推理服务（HTTP 协议，OpenAI 兼容）
-const XUNFEI_HTTP_API_KEY = import.meta.env.VITE_XUNFEI_HTTP_API_KEY
+const XUNFEI_HTTP_API_KEY = getEnv('VITE_XUNFEI_HTTP_API_KEY')
 // 兼容 OpenAI 路径：/v1/chat/completions
 const XUNFEI_HTTP_ENDPOINT = 'https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions'
 // 模型名称，需在 .env 配置，例如：General-Spark-Standard 或 General-Spark-Lite
-const XUNFEI_MODEL = import.meta.env.VITE_XUNFEI_MODEL
+const XUNFEI_MODEL = getEnv('VITE_XUNFEI_MODEL')
 
 // ---------- Helpers for geocoding & normalization (module scope) ----------
 function isValidLongitude(lng) {
@@ -276,8 +277,10 @@ async function enrichItineraryWithCoords({ itinerary, destination, days, budget,
  * @returns {Promise<Object>} Structured itinerary object
  */
 export async function generateItinerary({ destination, days, budget, travelers, preferences }) {
-  if (!QIANWEN_API_KEY || QIANWEN_API_KEY === 'your_qianwen_api_key') {
-    throw new Error('行程生成服务未配置：请在 .env 设置 VITE_QIANWEN_API_KEY')
+  const QIANWEN_API_KEY = getQIANWEN_API_KEY()
+  if (!QIANWEN_API_KEY) {
+    try { window.dispatchEvent(new CustomEvent('env:config-required', { detail: { missing: ['VITE_QIANWEN_API_KEY'] } })) } catch {}
+    throw new Error('行程生成服务未配置：请在设置中填写 VITE_QIANWEN_API_KEY')
   }
 
   try {
@@ -448,7 +451,7 @@ export async function parseVoiceInput(voiceInput) {
   const tz = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
   const currentContext = `当前系统时间：${currentDate} ${currentTime}（UTC${tz}）`
   // 1) 优先使用讯飞 Spark HTTP（OpenAI 兼容）
-  if (XUNFEI_HTTP_API_KEY) {
+    if (XUNFEI_HTTP_API_KEY) {
     const systemPrompt = `你是一个智能助理，负责从用户的自然语言输入中提取旅行计划的关键信息。
 
 你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明。如果某个字段在用户输入中没有提及，请将其值设为 null。
@@ -505,7 +508,8 @@ export async function parseVoiceInput(voiceInput) {
   }
 
   // 2) 次选：通义千问（若配置可用）
-  if (QIANWEN_API_KEY && QIANWEN_API_KEY !== 'your_qianwen_api_key') {
+  const QIANWEN_API_KEY_FALLBACK = getQIANWEN_API_KEY()
+  if (QIANWEN_API_KEY_FALLBACK) {
     const systemPrompt = `你是一个智能助理，负责从用户的自然语言输入中提取旅行计划的关键信息。
 
 你必须严格按照以下JSON格式返回结果，不要添加任何其他文字说明。如果某个字段在用户输入中没有提及，请将其值设为 null。
@@ -530,7 +534,7 @@ export async function parseVoiceInput(voiceInput) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${QIANWEN_API_KEY}`,
+        'Authorization': `Bearer ${QIANWEN_API_KEY_FALLBACK}`,
         },
         body: JSON.stringify({
           model: 'qwen-turbo',

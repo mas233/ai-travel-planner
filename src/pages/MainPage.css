@@ -179,6 +179,12 @@
   flex-shrink: 0;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px; /* 收窄齿轮与退出登录的间距 */
+}
+
 .user-info {
   display: flex;
   align-items: center;
